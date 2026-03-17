@@ -1,0 +1,86 @@
+// Package main provides the entry point for the newt application.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/fosrl/newt/internal/app"
+	"github.com/fosrl/newt/pkg/version"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	// Load configuration from env and flags
+	cfg, err := app.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Setup logger
+	logger := setupLogger(cfg.LogLevel)
+	logger.Info("newt starting", "version", version.Short())
+
+	// Create application
+	application, err := app.New(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("create app: %w", err)
+	}
+
+	// Setup context with signal handling
+	ctx, stop := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Run application (blocks until signal)
+	if err := application.Run(ctx); err != nil && err != context.Canceled {
+		logger.Error("application error", "error", err)
+	}
+
+	// Graceful shutdown with timeout
+	logger.Info("initiating graceful shutdown")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := application.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("shutdown error", "error", err)
+	}
+
+	logger.Info("shutdown complete")
+	return nil
+}
+
+// setupLogger creates a structured logger based on the log level.
+func setupLogger(level string) *slog.Logger {
+	var logLevel slog.Level
+	switch level {
+	case "DEBUG":
+		logLevel = slog.LevelDebug
+	case "INFO":
+		logLevel = slog.LevelInfo
+	case "WARN":
+		logLevel = slog.LevelWarn
+	case "ERROR", "FATAL":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: logLevel,
+	}
+
+	handler := slog.NewTextHandler(os.Stderr, opts)
+	return slog.New(handler)
+}
