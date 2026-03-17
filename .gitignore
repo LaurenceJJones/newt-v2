@@ -1,0 +1,13 @@
+bin/
+newt
+
+.test.cmd
+.resume
+.claude/
+
+*.log
+*.out
+*.test
+coverage.*
+
+.DS_Store

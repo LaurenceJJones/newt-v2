@@ -1,0 +1,482 @@
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/fosrl/newt/internal/control"
+	"github.com/fosrl/newt/internal/lifecycle"
+)
+
+// Manager coordinates TCP and UDP proxies for all targets.
+type Manager struct {
+	logger *slog.Logger
+
+	// Control plane client for receiving commands
+	controlClient *control.Client
+
+	// Dialer for creating connections (set when tunnel connects)
+	mu       sync.RWMutex
+	dialer   NetDialer
+	listenIP string
+
+	// Active proxies
+	proxies map[TargetKey]*activeProxy
+	pending []Target
+
+	// Lifecycle
+	group *lifecycle.Group
+}
+
+// activeProxy tracks a running proxy.
+type activeProxy struct {
+	target  Target
+	tcp     *TCPProxy
+	udp     *UDPProxy
+	cancel  context.CancelFunc
+	stopped chan struct{}
+}
+
+func targetKey(target Target) TargetKey {
+	return TargetKey{Protocol: target.Protocol, ListenAddr: target.ListenAddr}
+}
+
+// NewManager creates a new proxy manager.
+func NewManager(controlClient *control.Client, logger *slog.Logger) *Manager {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &Manager{
+		logger:        logger,
+		controlClient: controlClient,
+		proxies:       make(map[TargetKey]*activeProxy),
+	}
+}
+
+// Name returns the component name.
+func (m *Manager) Name() string {
+	return "proxy"
+}
+
+// Start initializes the proxy manager and registers handlers.
+func (m *Manager) Start(ctx context.Context) error {
+	m.group = lifecycle.NewGroup(ctx)
+	m.flushPendingTargets()
+
+	// Register message handlers
+	m.controlClient.Register(control.MsgTCPAdd, m.handleAddTCP)
+	m.controlClient.Register(control.MsgTCPRemove, m.handleRemoveTCP)
+	m.controlClient.Register(control.MsgUDPAdd, m.handleAddUDP)
+	m.controlClient.Register(control.MsgUDPRemove, m.handleRemoveUDP)
+
+	m.logger.Info("proxy manager started")
+
+	// Wait for context cancellation
+	<-ctx.Done()
+
+	// Stop all proxies
+	m.stopAll()
+
+	return ctx.Err()
+}
+
+// SetDialer sets the dialer for creating connections.
+// This is called when the tunnel connects.
+func (m *Manager) SetDialer(dialer NetDialer) {
+	m.mu.Lock()
+	m.dialer = dialer
+	m.mu.Unlock()
+
+	m.flushPendingTargets()
+	m.logger.Debug("dialer set")
+}
+
+// SetListenIP sets the tunnel interface IP used for proxy listeners.
+func (m *Manager) SetListenIP(ip string) {
+	m.mu.Lock()
+	m.listenIP = ip
+	m.mu.Unlock()
+}
+
+// ListenIP returns the currently configured tunnel listen IP.
+func (m *Manager) ListenIP() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.listenIP
+}
+
+// PendingCount returns the number of queued targets waiting for the proxy manager
+// to become ready.
+func (m *Manager) PendingCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.pending)
+}
+
+// Reset clears all active and pending targets and removes the current dialer.
+func (m *Manager) Reset() {
+	m.stopAll()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pending = nil
+	m.dialer = nil
+	m.listenIP = ""
+}
+
+// handleAddTCP handles the TCP add message.
+func (m *Manager) handleAddTCP(msg control.Message) error {
+	return m.handleAdd(msg, "tcp")
+}
+
+// handleRemoveTCP handles the TCP remove message.
+func (m *Manager) handleRemoveTCP(msg control.Message) error {
+	return m.handleRemove(msg, "tcp")
+}
+
+// handleAddUDP handles the UDP add message.
+func (m *Manager) handleAddUDP(msg control.Message) error {
+	return m.handleAdd(msg, "udp")
+}
+
+// handleRemoveUDP handles the UDP remove message.
+func (m *Manager) handleRemoveUDP(msg control.Message) error {
+	return m.handleRemove(msg, "udp")
+}
+
+func (m *Manager) handleAdd(msg control.Message, protocol string) error {
+	var data control.TargetsData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		return fmt.Errorf("unmarshal %s add data: %w", protocol, err)
+	}
+
+	for _, targetStr := range data.Targets {
+		target, err := m.parseTargetString(targetStr, protocol)
+		if err != nil {
+			m.logger.Warn("invalid target", "protocol", protocol, "target", targetStr, "error", err)
+			continue
+		}
+		if err := m.addTarget(target); err != nil {
+			m.logger.Warn("add target failed", "protocol", protocol, "target", targetStr, "error", err)
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) handleRemove(msg control.Message, protocol string) error {
+	var data control.TargetsData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		return fmt.Errorf("unmarshal %s remove data: %w", protocol, err)
+	}
+
+	for _, targetStr := range data.Targets {
+		target, err := m.parseTargetString(targetStr, protocol)
+		if err != nil {
+			m.logger.Warn("invalid target", "protocol", protocol, "target", targetStr, "error", err)
+			continue
+		}
+		if err := m.removeTarget(target.Protocol, target.ListenAddr); err != nil {
+			m.logger.Warn("remove target failed", "protocol", protocol, "target", targetStr, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// SyncTargets reconciles the active proxy targets with the desired target set.
+func (m *Manager) SyncTargets(targets control.TargetsByType) error {
+	// Build set of targets to keep
+	keep := make(map[TargetKey]bool)
+
+	// Add TCP targets
+	for _, targetStr := range targets.TCP {
+		target, err := m.parseTargetString(targetStr, "tcp")
+		if err != nil {
+			m.logger.Warn("invalid tcp target", "error", err)
+			continue
+		}
+		key := targetKey(target)
+		keep[key] = true
+		if err := m.addTarget(target); err != nil {
+			m.logger.Warn("add tcp target failed", "error", err)
+		}
+	}
+
+	// Add UDP targets
+	for _, targetStr := range targets.UDP {
+		target, err := m.parseTargetString(targetStr, "udp")
+		if err != nil {
+			m.logger.Warn("invalid udp target", "error", err)
+			continue
+		}
+		key := targetKey(target)
+		keep[key] = true
+		if err := m.addTarget(target); err != nil {
+			m.logger.Warn("add udp target failed", "error", err)
+		}
+	}
+
+	// Remove targets not in sync
+	m.mu.Lock()
+	pending := m.pending[:0]
+	for _, target := range m.pending {
+		key := targetKey(target)
+		if keep[key] {
+			pending = append(pending, target)
+		}
+	}
+	m.pending = pending
+
+	toRemove := make([]TargetKey, 0)
+	for key := range m.proxies {
+		if !keep[key] {
+			toRemove = append(toRemove, key)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, key := range toRemove {
+		if err := m.removeTarget(key.Protocol, key.ListenAddr); err != nil {
+			m.logger.Warn("remove stale target failed", "key", key, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// addTarget adds or updates a proxy target.
+func (m *Manager) addTarget(target Target) error {
+	m.mu.Lock()
+	if m.group == nil || m.dialer == nil {
+		key := targetKey(target)
+		for i, pending := range m.pending {
+			if targetKey(pending) == key {
+				m.pending[i] = target
+				m.mu.Unlock()
+				return nil
+			}
+		}
+		m.pending = append(m.pending, target)
+		m.mu.Unlock()
+		return nil
+	}
+
+	key := targetKey(target)
+	existing := m.proxies[key]
+	if existing != nil {
+		delete(m.proxies, key)
+	}
+	group := m.group
+	dialer := m.dialer
+	m.mu.Unlock()
+
+	if existing != nil {
+		m.logger.Debug("replacing existing proxy", "key", key)
+		m.stopProxy(existing)
+	}
+
+	_, cancel := context.WithCancel(group.Context())
+	stopped := make(chan struct{})
+
+	ap := &activeProxy{
+		target:  target,
+		cancel:  cancel,
+		stopped: stopped,
+	}
+
+	switch target.Protocol {
+	case "tcp":
+		proxy := NewTCPProxy(target, dialer, m.logger)
+		ap.tcp = proxy
+		group.Go(func(gctx context.Context) error {
+			defer close(stopped)
+			return proxy.Start(gctx)
+		})
+
+	case "udp":
+		proxy := NewUDPProxy(target, dialer, m.logger)
+		ap.udp = proxy
+		group.Go(func(gctx context.Context) error {
+			defer close(stopped)
+			return proxy.Start(gctx)
+		})
+
+	default:
+		cancel()
+		return fmt.Errorf("unknown protocol: %s", target.Protocol)
+	}
+
+	m.mu.Lock()
+	m.proxies[key] = ap
+	m.mu.Unlock()
+	m.logger.Info("proxy added",
+		"protocol", target.Protocol,
+		"listen", target.ListenAddr,
+		"target", target.TargetAddr,
+	)
+
+	return nil
+}
+
+// flushPendingTargets starts any queued targets once the proxy manager is ready.
+func (m *Manager) flushPendingTargets() {
+	m.mu.Lock()
+	if m.group == nil || m.dialer == nil || len(m.pending) == 0 {
+		m.mu.Unlock()
+		return
+	}
+
+	pending := append([]Target(nil), m.pending...)
+	m.pending = nil
+	m.mu.Unlock()
+
+	for _, target := range pending {
+		if err := m.addTarget(target); err != nil {
+			m.logger.Warn("flush queued target failed",
+				"protocol", target.Protocol,
+				"listen", target.ListenAddr,
+				"target", target.TargetAddr,
+				"error", err,
+			)
+		}
+	}
+}
+
+// removeTarget removes a proxy target.
+func (m *Manager) removeTarget(protocol, listenAddr string) error {
+	m.mu.Lock()
+	key := TargetKey{Protocol: protocol, ListenAddr: listenAddr}
+	proxy := m.proxies[key]
+	if proxy != nil {
+		delete(m.proxies, key)
+	}
+	m.mu.Unlock()
+
+	if proxy == nil {
+		return nil
+	}
+
+	m.stopProxy(proxy)
+
+	m.logger.Info("proxy removed", "protocol", protocol, "listen", listenAddr)
+	return nil
+}
+
+// stopAll stops all active proxies.
+func (m *Manager) stopAll() {
+	m.mu.Lock()
+	proxies := make([]*activeProxy, 0, len(m.proxies))
+	for key, proxy := range m.proxies {
+		proxies = append(proxies, proxy)
+		delete(m.proxies, key)
+	}
+	m.mu.Unlock()
+
+	for _, proxy := range proxies {
+		m.stopProxy(proxy)
+	}
+}
+
+// Shutdown gracefully shuts down the proxy manager.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.stopAll()
+	return nil
+}
+
+// AddTCPTargets adds TCP proxy targets from target strings.
+func (m *Manager) AddTCPTargets(targets []string) {
+	m.addTargetsFromStrings(targets, "tcp")
+}
+
+// AddUDPTargets adds UDP proxy targets from target strings.
+func (m *Manager) AddUDPTargets(targets []string) {
+	m.addTargetsFromStrings(targets, "udp")
+}
+
+func (m *Manager) addTargetsFromStrings(targets []string, protocol string) {
+	for _, targetStr := range targets {
+		target, err := m.parseTargetString(targetStr, protocol)
+		if err != nil {
+			m.logger.Warn("invalid target", "protocol", protocol, "target", targetStr, "error", err)
+			continue
+		}
+		if err := m.addTarget(target); err != nil {
+			m.logger.Warn("add target failed", "protocol", protocol, "target", targetStr, "error", err)
+		}
+	}
+}
+
+func (m *Manager) stopProxy(proxy *activeProxy) {
+	if proxy == nil {
+		return
+	}
+	proxy.cancel()
+	<-proxy.stopped
+}
+
+func (m *Manager) currentListenIP() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.listenIP
+}
+
+// parseTargetString parses a target string in the format "listenPort:targetHost:targetPort".
+// It properly handles IPv6 addresses which must be in brackets: "listenPort:[ipv6]:targetPort"
+func (m *Manager) parseTargetString(targetStr, protocol string) (Target, error) {
+	// Find the first colon to extract the listen port
+	firstColon := strings.Index(targetStr, ":")
+	if firstColon == -1 {
+		return Target{}, fmt.Errorf("invalid target format: %s (expected port:host:port)", targetStr)
+	}
+
+	listenPortStr := targetStr[:firstColon]
+	listenPort, err := strconv.Atoi(listenPortStr)
+	if err != nil {
+		return Target{}, fmt.Errorf("invalid listen port: %s", listenPortStr)
+	}
+
+	// The rest is host:port - handle IPv6 in brackets
+	rest := targetStr[firstColon+1:]
+
+	var targetHost, targetPort string
+	if strings.HasPrefix(rest, "[") {
+		// IPv6 address in brackets: [ipv6]:port
+		closeBracket := strings.Index(rest, "]")
+		if closeBracket == -1 {
+			return Target{}, fmt.Errorf("invalid IPv6 format: %s", targetStr)
+		}
+		targetHost = rest[:closeBracket+1] // Include brackets
+		if len(rest) <= closeBracket+2 || rest[closeBracket+1] != ':' {
+			return Target{}, fmt.Errorf("invalid target format: %s", targetStr)
+		}
+		targetPort = rest[closeBracket+2:]
+	} else {
+		// IPv4 or hostname: host:port
+		lastColon := strings.LastIndex(rest, ":")
+		if lastColon == -1 {
+			return Target{}, fmt.Errorf("invalid target format: %s (expected port:host:port)", targetStr)
+		}
+		targetHost = rest[:lastColon]
+		targetPort = rest[lastColon+1:]
+	}
+
+	listenIP := m.currentListenIP()
+	if listenIP == "" {
+		return Target{}, errors.New("no tunnel listen ip set")
+	}
+
+	return Target{
+		Protocol:   protocol,
+		ListenAddr: fmt.Sprintf("%s:%d", listenIP, listenPort),
+		TargetAddr: fmt.Sprintf("%s:%s", targetHost, targetPort),
+		Enabled:    true,
+	}, nil
+}

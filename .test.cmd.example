@@ -1,0 +1,5 @@
+./bin/newt \
+  --id YOUR_NEWT_ID \
+  --secret YOUR_NEWT_SECRET \
+  --endpoint https://your-pangolin.example.com \
+  --log-level DEBUG
