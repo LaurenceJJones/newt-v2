@@ -13,6 +13,7 @@ import (
 
 	"github.com/fosrl/newt/internal/control"
 	"github.com/fosrl/newt/internal/lifecycle"
+	"github.com/fosrl/newt/internal/telemetry"
 )
 
 // Manager coordinates TCP and UDP proxies for all targets.
@@ -310,6 +311,7 @@ func (m *Manager) addTarget(target Target) error {
 	m.mu.Lock()
 	m.proxies[key] = ap
 	m.mu.Unlock()
+	telemetry.AddActiveProxyTargets(target.Protocol, 1)
 	m.logger.Info("proxy added",
 		"protocol", target.Protocol,
 		"listen", target.ListenAddr,
@@ -371,6 +373,7 @@ func (m *Manager) removeTarget(target Target) error {
 	}
 
 	m.stopProxy(proxy)
+	telemetry.AddActiveProxyTargets(target.Protocol, -1)
 
 	m.logger.Info("proxy removed", "protocol", target.Protocol, "listen", target.ListenAddr)
 	return nil
@@ -387,6 +390,7 @@ func (m *Manager) stopAll() {
 	m.mu.Unlock()
 
 	for _, proxy := range proxies {
+		telemetry.AddActiveProxyTargets(proxy.target.Protocol, -1)
 		m.stopProxy(proxy)
 	}
 }

@@ -88,3 +88,14 @@ func TestLoadFromEnvLoadsTelemetryPprofFlag(t *testing.T) {
 		t.Fatal("expected pprof to be enabled from environment")
 	}
 }
+
+func TestLoadFromEnvLoadsMetricsAsyncBytesFlag(t *testing.T) {
+	t.Setenv("METRICS_ASYNC_BYTES", "true")
+
+	cfg := DefaultConfig()
+	cfg.loadFromEnv()
+
+	if !cfg.MetricsAsyncBytes {
+		t.Fatal("expected metrics async bytes to be enabled from environment")
+	}
+}

@@ -59,11 +59,12 @@ type Config struct {
 	AuthDaemonRandomPass bool   // Generate random password for auth daemon
 
 	// Telemetry
-	MetricsEnabled bool   // Enable Prometheus metrics endpoint
-	OTLPEnabled    bool   // Enable OpenTelemetry export
-	AdminAddr      string // Address for metrics/admin server (default 127.0.0.1:2112)
-	PprofEnabled   bool   // Enable pprof handlers on the admin server
-	Region         string // Region label for metrics
+	MetricsEnabled    bool   // Enable Prometheus metrics endpoint
+	OTLPEnabled       bool   // Enable OpenTelemetry export
+	AdminAddr         string // Address for metrics/admin server (default 127.0.0.1:2112)
+	MetricsAsyncBytes bool   // Enable async byte metric flushing
+	PprofEnabled      bool   // Enable pprof handlers on the admin server
+	Region            string // Region label for metrics
 
 	// Logging
 	LogLevel string // Log level: DEBUG, INFO, WARN, ERROR, FATAL
@@ -207,6 +208,7 @@ func (c *Config) loadTelemetryEnv() {
 	envBool("NEWT_METRICS_PROMETHEUS_ENABLED", &c.MetricsEnabled)
 	envBool("NEWT_METRICS_OTLP_ENABLED", &c.OTLPEnabled)
 	envString("NEWT_ADMIN_ADDR", &c.AdminAddr)
+	envBool("METRICS_ASYNC_BYTES", &c.MetricsAsyncBytes)
 	envBool("NEWT_PPROF_ENABLED", &c.PprofEnabled)
 	envString("NEWT_REGION", &c.Region)
 }
@@ -276,6 +278,7 @@ func (c *Config) registerTelemetryFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&c.MetricsEnabled, "metrics", c.MetricsEnabled, "Enable Prometheus metrics")
 	fs.BoolVar(&c.OTLPEnabled, "otlp", c.OTLPEnabled, "Enable OpenTelemetry export")
 	fs.StringVar(&c.AdminAddr, "metrics-admin-addr", c.AdminAddr, "Metrics server address")
+	fs.BoolVar(&c.MetricsAsyncBytes, "metrics-async-bytes", c.MetricsAsyncBytes, "Enable async byte metric flushing")
 	fs.BoolVar(&c.PprofEnabled, "pprof", c.PprofEnabled, "Enable pprof handlers on the admin server")
 	fs.StringVar(&c.Region, "region", c.Region, "Region label for metrics")
 }

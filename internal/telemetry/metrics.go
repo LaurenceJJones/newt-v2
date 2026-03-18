@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -19,10 +20,10 @@ type Metrics struct {
 	ActiveConnections  metric.Int64UpDownCounter
 
 	// Tunnel metrics
-	TunnelLatency   metric.Float64Histogram
-	TunnelBytesIn   metric.Int64Counter
-	TunnelBytesOut  metric.Int64Counter
-	TunnelPacketsIn metric.Int64Counter
+	TunnelLatency    metric.Float64Histogram
+	TunnelBytesIn    metric.Int64Counter
+	TunnelBytesOut   metric.Int64Counter
+	TunnelPacketsIn  metric.Int64Counter
 	TunnelPacketsOut metric.Int64Counter
 
 	// Proxy metrics
@@ -38,14 +39,16 @@ type Metrics struct {
 	HealthCheckLatency  metric.Float64Histogram
 
 	// Async byte counters for efficient batch updates
-	asyncCounters *asyncCounterSet
+	asyncCounters      *asyncCounterSet
+	proxyAsyncCounters *proxyAsyncCounterSet
 }
 
 // NewMetrics creates metrics instruments from the given meter.
 func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	m := &Metrics{
-		meter:         meter,
-		asyncCounters: newAsyncCounterSet(),
+		meter:              meter,
+		asyncCounters:      newAsyncCounterSet(),
+		proxyAsyncCounters: newProxyAsyncCounterSet(),
 	}
 
 	var err error
@@ -195,6 +198,43 @@ func (m *Metrics) RecordProxyError(ctx context.Context, protocol, errorType stri
 		))
 }
 
+func (m *Metrics) AddProxyBytes(ctx context.Context, protocol, target string, bytesIn, bytesOut int64, async bool) {
+	if async {
+		m.proxyAsyncCounters.add(protocol, target, bytesIn, bytesOut)
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("protocol", protocol),
+		attribute.String("target", target),
+	)
+	if bytesIn > 0 {
+		m.ProxyBytesIn.Add(ctx, bytesIn, attrs)
+	}
+	if bytesOut > 0 {
+		m.ProxyBytesOut.Add(ctx, bytesOut, attrs)
+	}
+}
+
+func (m *Metrics) FlushProxyBytes(ctx context.Context) {
+	m.proxyAsyncCounters.flush(func(protocol, target string, bytesIn, bytesOut int64) {
+		attrs := metric.WithAttributes(
+			attribute.String("protocol", protocol),
+			attribute.String("target", target),
+		)
+		if bytesIn > 0 {
+			m.ProxyBytesIn.Add(ctx, bytesIn, attrs)
+		}
+		if bytesOut > 0 {
+			m.ProxyBytesOut.Add(ctx, bytesOut, attrs)
+		}
+	})
+}
+
+func (m *Metrics) AddActiveProxyTargets(ctx context.Context, protocol string, delta int64) {
+	m.ActiveProxyTargets.Add(ctx, delta, metric.WithAttributes(attribute.String("protocol", protocol)))
+}
+
 // RecordHealthCheck records a health check result.
 func (m *Metrics) RecordHealthCheck(ctx context.Context, targetID string, success bool, latencyMs float64) {
 	attrs := metric.WithAttributes(
@@ -263,6 +303,50 @@ func (s *asyncCounterSet) flush(fn func(key string, bytesIn, bytesOut int64)) {
 		bytesOut := counter.bytesOut.Swap(0)
 		if bytesIn > 0 || bytesOut > 0 {
 			fn(key, bytesIn, bytesOut)
+		}
+	}
+}
+
+type proxyAsyncCounterSet struct {
+	mu       sync.Mutex
+	counters map[string]*proxyAsyncCounter
+}
+
+type proxyAsyncCounter struct {
+	protocol string
+	target   string
+	bytesIn  atomic.Int64
+	bytesOut atomic.Int64
+}
+
+func newProxyAsyncCounterSet() *proxyAsyncCounterSet {
+	return &proxyAsyncCounterSet{counters: make(map[string]*proxyAsyncCounter)}
+}
+
+func (s *proxyAsyncCounterSet) add(protocol, target string, bytesIn, bytesOut int64) {
+	key := fmt.Sprintf("%s\x00%s", protocol, target)
+
+	s.mu.Lock()
+	counter, ok := s.counters[key]
+	if !ok {
+		counter = &proxyAsyncCounter{protocol: protocol, target: target}
+		s.counters[key] = counter
+	}
+	s.mu.Unlock()
+
+	counter.bytesIn.Add(bytesIn)
+	counter.bytesOut.Add(bytesOut)
+}
+
+func (s *proxyAsyncCounterSet) flush(fn func(protocol, target string, bytesIn, bytesOut int64)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, counter := range s.counters {
+		bytesIn := counter.bytesIn.Swap(0)
+		bytesOut := counter.bytesOut.Swap(0)
+		if bytesIn > 0 || bytesOut > 0 {
+			fn(counter.protocol, counter.target, bytesIn, bytesOut)
 		}
 	}
 }

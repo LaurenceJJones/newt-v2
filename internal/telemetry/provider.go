@@ -28,6 +28,7 @@ type Config struct {
 	ServiceVersion string
 	Region         string
 	PrometheusAddr string // Address for Prometheus metrics endpoint
+	AsyncBytes     bool   // Enable async byte metric flushing
 	PprofEnabled   bool   // Enable pprof handlers on the admin server
 	OTLPEnabled    bool   // Enable OTLP export
 	OTLPEndpoint   string // OTLP collector endpoint
@@ -43,7 +44,8 @@ type Provider struct {
 	httpServer     *http.Server
 
 	// Meter for creating instruments
-	Meter metric.Meter
+	Meter   metric.Meter
+	Metrics *Metrics
 }
 
 // NewProvider creates a new telemetry provider.
@@ -109,6 +111,14 @@ func (p *Provider) init() error {
 	otel.SetMeterProvider(p.meterProvider)
 	p.Meter = p.meterProvider.Meter(p.cfg.ServiceName)
 
+	metrics, err := NewMetrics(p.Meter)
+	if err != nil {
+		return fmt.Errorf("create metrics instruments: %w", err)
+	}
+	p.Metrics = metrics
+	SetMetrics(metrics)
+	SetAsyncBytes(p.cfg.AsyncBytes)
+
 	// Setup tracer provider (if OTLP enabled)
 	if p.cfg.OTLPEnabled && p.cfg.OTLPEndpoint != "" {
 		traceExporter, err := otlptracegrpc.New(ctx,
@@ -164,6 +174,8 @@ func (p *Provider) Start(ctx context.Context) error {
 
 	p.logger.Info("starting metrics server", "addr", p.cfg.PrometheusAddr)
 
+	go p.flushLoop(ctx)
+
 	// Start server in goroutine
 	errCh := make(chan error, 1)
 	go func() {
@@ -182,9 +194,35 @@ func (p *Provider) Start(ctx context.Context) error {
 	}
 }
 
+func (p *Provider) flushLoop(ctx context.Context) {
+	if p.Metrics == nil {
+		return
+	}
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			p.Metrics.FlushTunnelBytes(context.Background())
+			p.Metrics.FlushProxyBytes(context.Background())
+			return
+		case <-ticker.C:
+			p.Metrics.FlushTunnelBytes(context.Background())
+			p.Metrics.FlushProxyBytes(context.Background())
+		}
+	}
+}
+
 // Shutdown gracefully shuts down the telemetry provider.
 func (p *Provider) Shutdown(ctx context.Context) error {
 	var errs []error
+
+	if p.Metrics != nil {
+		p.Metrics.FlushTunnelBytes(context.Background())
+		p.Metrics.FlushProxyBytes(context.Background())
+	}
 
 	// Shutdown HTTP server
 	if p.httpServer != nil {
@@ -206,6 +244,8 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("shutdown meter: %w", err))
 		}
 	}
+
+	ClearMetrics(p.Metrics)
 
 	return errors.Join(errs...)
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/internal/netstack/relay"
+	"github.com/fosrl/newt/internal/telemetry"
 )
 
 // TCPProxy handles TCP proxying for a single target.
@@ -85,10 +86,12 @@ func (p *TCPProxy) Start(ctx context.Context) error {
 			}
 			p.logger.Warn("accept error", "error", err)
 			p.errorCount.Add(1)
+			telemetry.RecordProxyError(p.target.Protocol, "accept")
 			continue
 		}
 
 		p.connCount.Add(1)
+		telemetry.RecordProxyConnection(p.target.Protocol, p.target.TargetAddr)
 		p.wg.Add(1)
 		go p.handleConnection(conn)
 	}
@@ -108,13 +111,18 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 			"error", err,
 		)
 		p.errorCount.Add(1)
+		telemetry.RecordProxyError(p.target.Protocol, "dial")
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
 
 	relay.TCP(
-		relay.WrapWriteCounter(clientConn, &p.bytesIn),
-		relay.WrapWriteCounter(targetConn, &p.bytesOut),
+		relay.WrapWriteCounterWithHook(clientConn, &p.bytesIn, func(n int64) {
+			telemetry.AddProxyBytes(p.target.Protocol, p.target.TargetAddr, n, 0)
+		}),
+		relay.WrapWriteCounterWithHook(targetConn, &p.bytesOut, func(n int64) {
+			telemetry.AddProxyBytes(p.target.Protocol, p.target.TargetAddr, 0, n)
+		}),
 		relay.TCPOptions{WaitTimeout: 60 * time.Second},
 	)
 }

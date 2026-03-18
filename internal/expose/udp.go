@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/internal/netstack/relay"
+	"github.com/fosrl/newt/internal/telemetry"
 )
 
 const (
@@ -110,11 +111,13 @@ func (p *UDPProxy) Start(ctx context.Context) error {
 			}
 			p.logger.Warn("read error", "error", err)
 			p.errorCount.Add(1)
+			telemetry.RecordProxyError(p.target.Protocol, "read")
 			continue
 		}
 
 		p.packetIn.Add(1)
 		p.bytesIn.Add(int64(n))
+		telemetry.AddProxyBytes(p.target.Protocol, p.target.TargetAddr, int64(n), 0)
 
 		// Get or create session
 		session := p.getOrCreateSession(clientAddr)
@@ -128,6 +131,7 @@ func (p *UDPProxy) Start(ctx context.Context) error {
 		if err != nil {
 			p.logger.Debug("write to target error", "error", err)
 			p.errorCount.Add(1)
+			telemetry.RecordProxyError(p.target.Protocol, "write")
 			continue
 		}
 		session.bytesOut.Add(int64(n))
@@ -149,8 +153,10 @@ func (p *UDPProxy) getOrCreateSession(clientAddr net.Addr) *udpSession {
 	if err != nil {
 		p.logger.Warn("dial target failed", "target", p.target.TargetAddr, "error", err)
 		p.errorCount.Add(1)
+		telemetry.RecordProxyError(p.target.Protocol, "dial")
 		return nil
 	}
+	telemetry.RecordProxyConnection(p.target.Protocol, p.target.TargetAddr)
 
 	session := &udpSession{
 		clientAddr: clientAddr,
@@ -215,12 +221,14 @@ func (p *UDPProxy) readFromTarget(session *udpSession, key string) {
 		session.bytesIn.Add(int64(n))
 		p.bytesOut.Add(int64(n))
 		p.packetOut.Add(1)
+		telemetry.AddProxyBytes(p.target.Protocol, p.target.TargetAddr, 0, int64(n))
 
 		// Send to client
 		_, err = p.listener.WriteTo(buf[:n], session.clientAddr)
 		if err != nil {
 			p.logger.Debug("write to client error", "error", err)
 			p.errorCount.Add(1)
+			telemetry.RecordProxyError(p.target.Protocol, "write")
 		}
 	}
 }

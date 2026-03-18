@@ -3,8 +3,8 @@ package relay
 import (
 	"io"
 	"net"
-	"sync/atomic"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,18 +21,26 @@ type UDPOptions struct {
 type writeCountingConn struct {
 	net.Conn
 	counter *atomic.Int64
+	hook    func(int64)
 }
 
 func WrapWriteCounter(conn net.Conn, counter *atomic.Int64) net.Conn {
+	return WrapWriteCounterWithHook(conn, counter, nil)
+}
+
+func WrapWriteCounterWithHook(conn net.Conn, counter *atomic.Int64, hook func(int64)) net.Conn {
 	if conn == nil || counter == nil {
 		return conn
 	}
-	return &writeCountingConn{Conn: conn, counter: counter}
+	return &writeCountingConn{Conn: conn, counter: counter, hook: hook}
 }
 
 func (c *writeCountingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.counter.Add(int64(n))
+	if c.hook != nil && n > 0 {
+		c.hook(int64(n))
+	}
 	return n, err
 }
 
