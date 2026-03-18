@@ -9,6 +9,7 @@ import (
 )
 
 const defaultBufferSize = 32 * 1024
+const udpBufferSize = 65535
 
 type TCPOptions struct {
 	WaitTimeout time.Duration
@@ -71,7 +72,8 @@ func TCP(origin, remote net.Conn, options TCPOptions) {
 func copyTCP(dst, src net.Conn, waitTimeout time.Duration, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	buf := make([]byte, defaultBufferSize)
+	buf := acquireStreamBuffer()
+	defer releaseStreamBuffer(buf)
 	_, _ = io.CopyBuffer(dst, src, buf)
 
 	if cr, ok := src.(interface{ CloseRead() error }); ok {
@@ -100,7 +102,8 @@ func copyUDP(dst, src net.PacketConn, to net.Addr, timeout time.Duration, wg *sy
 }
 
 func copyPacketData(dst, src net.PacketConn, to net.Addr, timeout time.Duration) error {
-	buf := make([]byte, 65535)
+	buf := AcquirePacketBuffer()
+	defer ReleasePacketBuffer(buf)
 
 	for {
 		_ = src.SetReadDeadline(time.Now().Add(timeout))

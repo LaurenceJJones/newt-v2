@@ -14,13 +14,7 @@ import (
 	"github.com/fosrl/newt/internal/telemetry"
 )
 
-const (
-	// udpBufferSize is the size of the UDP read buffer.
-	udpBufferSize = 65535
-
-	// udpSessionTimeout is how long to keep UDP sessions alive.
-	udpSessionTimeout = 60 * time.Second
-)
+const udpSessionTimeout = 60 * time.Second
 
 // UDPProxy handles UDP proxying for a single target.
 type UDPProxy struct {
@@ -87,7 +81,8 @@ func (p *UDPProxy) Start(ctx context.Context) error {
 	go p.cleanupSessions()
 
 	// Read loop
-	buf := make([]byte, udpBufferSize)
+	buf := relay.AcquirePacketBuffer()
+	defer relay.ReleasePacketBuffer(buf)
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -187,7 +182,8 @@ func (p *UDPProxy) readFromTarget(session *udpSession, key string) {
 		p.sessions.Delete(key)
 	}()
 
-	buf := make([]byte, udpBufferSize)
+	buf := relay.AcquirePacketBuffer()
+	defer relay.ReleasePacketBuffer(buf)
 	for {
 		select {
 		case <-p.ctx.Done():
