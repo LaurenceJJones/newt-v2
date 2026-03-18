@@ -160,7 +160,7 @@ func (c *Checker) check() {
 		c.statusCode = 0
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	c.statusCode = resp.StatusCode
 	c.lastError = ""

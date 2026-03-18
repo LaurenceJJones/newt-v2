@@ -1,15 +1,14 @@
 package authdaemon
 
 import (
-	"io"
 	"log/slog"
 	"path/filepath"
 	"testing"
+
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
-func testAuthLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+func testAuthLogger() *slog.Logger { return pkglogger.Discard() }
 
 func TestNewServerRequiresKeyWhenHTTPSEnabled(t *testing.T) {
 	_, err := NewServer(Config{

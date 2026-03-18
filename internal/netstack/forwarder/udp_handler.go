@@ -1,4 +1,4 @@
-package proxy
+package forwarder
 
 import (
 	"net"
@@ -6,7 +6,7 @@ import (
 
 	"github.com/fosrl/newt/internal/netstack/forwarding"
 	"github.com/fosrl/newt/internal/netstack/relay"
-	"github.com/fosrl/newt/logger"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -42,37 +42,37 @@ func (h *UDPHandler) InstallUDPHandler() error {
 }
 
 func (h *UDPHandler) handleUDPConn(netstackConn *gonet.UDPConn, id stack.TransportEndpointID) {
-	defer netstackConn.Close()
+	defer func() { _ = netstackConn.Close() }()
 
 	srcIP, ok := parseTransportAddress(id.RemoteAddress)
 	if !ok {
-		logger.Info("UDP Forwarder: Failed to parse source IP %s", id.RemoteAddress)
+		pkglogger.Debug("UDP Forwarder: Failed to parse source IP %s", id.RemoteAddress)
 		return
 	}
 	srcPort := id.RemotePort
 	dstIP, ok := parseTransportAddress(id.LocalAddress)
 	if !ok {
-		logger.Info("UDP Forwarder: Failed to parse destination IP %s", id.LocalAddress)
+		pkglogger.Debug("UDP Forwarder: Failed to parse destination IP %s", id.LocalAddress)
 		return
 	}
 	dstPort := id.LocalPort
 
-	logger.Info("UDP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
+	pkglogger.Debug("UDP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
 	target := forwarding.ResolveTarget(srcIP, dstIP, dstPort, uint8(udp.ProtocolNumber), h.engine)
 	if target.Rewritten {
-		logger.Info("UDP Forwarder: Using rewritten destination %s (original: %s)", target.Effective.Addr(), target.Original.Addr())
+		pkglogger.Debug("UDP Forwarder: Using rewritten destination %s (original: %s)", target.Effective.Addr(), target.Original.Addr())
 	}
 
 	remoteUDPAddr := net.UDPAddrFromAddrPort(target.Effective)
 	clientAddr := net.UDPAddrFromAddrPort(netip.AddrPortFrom(srcIP, srcPort))
 	targetConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
-		logger.Info("UDP Forwarder: Failed to create UDP socket: %v", err)
+		pkglogger.Warn("UDP Forwarder: Failed to create UDP socket: %v", err)
 		return
 	}
-	defer targetConn.Close()
+	defer func() { _ = targetConn.Close() }()
 
-	logger.Info("UDP Forwarder: Successfully created UDP socket for %s, starting bidirectional copy", target.Effective)
+	pkglogger.Debug("UDP Forwarder: Successfully created UDP socket for %s, starting bidirectional copy", target.Effective)
 	relay.UDP(netstackConn, targetConn, remoteUDPAddr, clientAddr, relay.UDPOptions{Timeout: udpSessionTimeout})
 }

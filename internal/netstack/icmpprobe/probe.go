@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/fosrl/newt/logger"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 )
@@ -43,10 +43,10 @@ func (p *Prober) Probe(actualDstIP string, ident, seq uint16, payload []byte) (s
 func (p *Prober) tryRawICMP(actualDstIP string, ident, seq uint16, payload []byte, ignoreIdent bool) bool {
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
-		logger.Debug("ICMP probe: raw socket unavailable: %v", err)
+		pkglogger.Debug("ICMP probe: raw socket unavailable: %v", err)
 		return false
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	return p.sendAndReceiveICMP(conn, actualDstIP, ident, seq, payload, false, ignoreIdent)
 }
@@ -54,10 +54,10 @@ func (p *Prober) tryRawICMP(actualDstIP string, ident, seq uint16, payload []byt
 func (p *Prober) tryUnprivilegedICMP(actualDstIP string, ident, seq uint16, payload []byte) bool {
 	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
 	if err != nil {
-		logger.Debug("ICMP probe: unprivileged socket unavailable: %v", err)
+		pkglogger.Debug("ICMP probe: unprivileged socket unavailable: %v", err)
 		return false
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	return p.sendAndReceiveICMP(conn, actualDstIP, ident, seq, payload, true, true)
 }
@@ -75,11 +75,11 @@ func (p *Prober) sendAndReceiveICMP(conn *icmp.PacketConn, actualDstIP string, i
 
 	msgBytes, err := echoMsg.Marshal(nil)
 	if err != nil {
-		logger.Debug("ICMP probe: marshal failed: %v", err)
+		pkglogger.Debug("ICMP probe: marshal failed: %v", err)
 		return false
 	}
 
-	conn.SetDeadline(time.Now().Add(p.Timeout))
+	_ = conn.SetDeadline(time.Now().Add(p.Timeout))
 
 	if isUnprivileged {
 		udpAddr := &net.UDPAddr{IP: net.ParseIP(actualDstIP)}
@@ -87,13 +87,13 @@ func (p *Prober) sendAndReceiveICMP(conn *icmp.PacketConn, actualDstIP string, i
 	} else {
 		dst, resolveErr := net.ResolveIPAddr("ip4", actualDstIP)
 		if resolveErr != nil {
-			logger.Debug("ICMP probe: resolve %s failed: %v", actualDstIP, resolveErr)
+			pkglogger.Debug("ICMP probe: resolve %s failed: %v", actualDstIP, resolveErr)
 			return false
 		}
 		_, err = conn.WriteTo(msgBytes, dst)
 	}
 	if err != nil {
-		logger.Debug("ICMP probe: send to %s failed: %v", actualDstIP, err)
+		pkglogger.Debug("ICMP probe: send to %s failed: %v", actualDstIP, err)
 		return false
 	}
 
@@ -101,7 +101,7 @@ func (p *Prober) sendAndReceiveICMP(conn *icmp.PacketConn, actualDstIP string, i
 	for {
 		n, _, err := conn.ReadFrom(replyBuf)
 		if err != nil {
-			logger.Debug("ICMP probe: receive from %s failed: %v", actualDstIP, err)
+			pkglogger.Debug("ICMP probe: receive from %s failed: %v", actualDstIP, err)
 			return false
 		}
 
@@ -134,7 +134,7 @@ func (p *Prober) tryPingCommand(actualDstIP string, ident, seq uint16, payload [
 	cmd := exec.CommandContext(ctx, "ping", "-c", "1", "-W", "5", "-q", actualDstIP)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Debug("ICMP probe: ping command failed: %v, output: %s", err, string(output))
+		pkglogger.Debug("ICMP probe: ping command failed: %v, output: %s", err, string(output))
 		return false
 	}
 	return true

@@ -16,6 +16,7 @@ import (
 
 	"github.com/fosrl/newt/internal/control"
 	"github.com/fosrl/newt/internal/lifecycle"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
 // Manager coordinates the WireGuard tunnel lifecycle.
@@ -115,10 +116,7 @@ func (m *Manager) Name() string {
 func (m *Manager) Start(ctx context.Context) error {
 	m.ctx = ctx
 
-	// Register message handlers
-	m.control.Register(control.MsgWgConnect, m.handleConnect)
-	m.control.Register(control.MsgWgReconnect, m.handleReconnect)
-	m.control.Register(control.MsgWgTerminate, m.handleTerminate)
+	m.registerHandlers()
 
 	m.logger.Info("tunnel manager started")
 
@@ -131,55 +129,70 @@ func (m *Manager) Start(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// handleConnect handles the WireGuard connect message.
-func (m *Manager) handleConnect(msg control.Message) error {
-	var data control.WgConnectData
-	if err := json.Unmarshal(msg.Data, &data); err != nil {
-		return fmt.Errorf("unmarshal connect data: %w", err)
+func (m *Manager) registerHandlers() {
+	if m.control == nil {
+		return
 	}
 
+	m.control.Register(control.MsgWgConnect, m.handleConnect)
+	m.control.Register(control.MsgWgReconnect, m.handleReconnect)
+	m.control.Register(control.MsgWgTerminate, m.handleTerminate)
+}
+
+func (m *Manager) decodeConnectData(msg control.Message) (control.WgConnectData, error) {
+	var data control.WgConnectData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		return control.WgConnectData{}, fmt.Errorf("unmarshal connect data: %w", err)
+	}
+	return data, nil
+}
+
+func (m *Manager) shouldKeepCurrentTunnel(data control.WgConnectData) bool {
 	if current := m.tunnel.Load(); current != nil && current.device != nil && reflect.DeepEqual(current.connectData, data) {
-		m.logger.Info("received identical connect command; keeping existing tunnel",
+		m.logger.Debug("received identical connect command; keeping existing tunnel",
 			"endpoint", data.Endpoint,
 			"server_ip", data.ServerIP,
 		)
-		return nil
+		return true
 	}
+	return false
+}
 
+func (m *Manager) connectTunnelParams(data control.WgConnectData) (netip.Addr, netip.Addr, error) {
 	m.logger.Info("received connect command",
 		"endpoint", data.Endpoint,
 		"server_ip", data.ServerIP,
 	)
 
-	// Parse tunnel IP
 	tunnelIP, err := netip.ParseAddr(data.TunnelIP)
 	if err != nil {
-		return fmt.Errorf("parse tunnel ip %q: %w", data.TunnelIP, err)
+		return netip.Addr{}, netip.Addr{}, fmt.Errorf("parse tunnel ip %q: %w", data.TunnelIP, err)
 	}
 
-	// Parse DNS
 	dnsIP, err := netip.ParseAddr(m.cfg.DNS)
 	if err != nil {
 		dnsIP = netip.MustParseAddr("9.9.9.9")
 	}
+	return tunnelIP, dnsIP, nil
+}
 
-	// Close existing tunnel if any
+func (m *Manager) activateTunnel(tunnelIP, dnsIP netip.Addr, data control.WgConnectData) (*activeTunnel, error) {
 	m.closeTunnel(StateDisconnected)
-
-	// Create new tunnel
 	m.state.Store(int32(StateConnecting))
 
 	tunnel, err := m.createTunnel(tunnelIP, dnsIP, data)
 	if err != nil {
 		m.logger.Warn("failed to create tunnel", "error", err)
 		m.requestRecovery("tunnel creation failed")
-		return nil
+		return nil, nil
 	}
 
 	m.tunnel.Store(tunnel)
 	m.state.Store(int32(StateConnected))
+	return tunnel, nil
+}
 
-	// Notify callback with initial targets
+func (m *Manager) notifyConnected(tunnelIP netip.Addr, tunnel *activeTunnel, data control.WgConnectData) {
 	if m.onConnect != nil {
 		info := TunnelInfo{
 			State:             StateConnected,
@@ -191,7 +204,6 @@ func (m *Manager) handleConnect(msg control.Message) error {
 			InitialUDPTargets: data.Targets.UDP,
 		}
 
-		// Convert health checks
 		for _, hc := range data.HealthCheckTargets {
 			info.InitialHealthChecks = append(info.InitialHealthChecks, HealthCheckInfo{
 				TargetID:          hc.ID,
@@ -218,7 +230,33 @@ func (m *Manager) handleConnect(msg control.Message) error {
 		"local_ip", tunnelIP,
 		"peer", data.PublicKey[:8]+"...",
 	)
+}
 
+// handleConnect handles the WireGuard connect message.
+func (m *Manager) handleConnect(msg control.Message) error {
+	data, err := m.decodeConnectData(msg)
+	if err != nil {
+		return err
+	}
+
+	if m.shouldKeepCurrentTunnel(data) {
+		return nil
+	}
+
+	tunnelIP, dnsIP, err := m.connectTunnelParams(data)
+	if err != nil {
+		return err
+	}
+
+	tunnel, err := m.activateTunnel(tunnelIP, dnsIP, data)
+	if err != nil {
+		return err
+	}
+	if tunnel == nil {
+		return nil
+	}
+
+	m.notifyConnected(tunnelIP, tunnel, data)
 	return nil
 }
 
@@ -245,21 +283,16 @@ func (m *Manager) createTunnel(localIP, dnsIP netip.Addr, data control.WgConnect
 
 	// Create WireGuard device
 	wgLogger := &device.Logger{
-		Verbosef: func(format string, args ...any) {
-			m.logger.Debug(fmt.Sprintf(format, args...))
-		},
-		Errorf: func(format string, args ...any) {
-			m.logger.Error(fmt.Sprintf(format, args...))
-		},
+		Verbosef: func(format string, args ...any) { pkglogger.Debugf(m.logger, format, args...) },
+		Errorf:   func(format string, args ...any) { pkglogger.Errorf(m.logger, format, args...) },
 	}
 
-	// Use standard bind for now
 	bind := conn.NewDefaultBind()
 
 	wgDevice, err := NewDevice(ns.Device(), bind, wgLogger, m.privateKeyHex)
 	if err != nil {
 		cancel()
-		ns.Close()
+		_ = ns.Close()
 		return nil, fmt.Errorf("create wireguard device: %w", err)
 	}
 
@@ -267,7 +300,7 @@ func (m *Manager) createTunnel(localIP, dnsIP netip.Addr, data control.WgConnect
 	if err != nil {
 		cancel()
 		wgDevice.Close()
-		ns.Close()
+		_ = ns.Close()
 		return nil, fmt.Errorf("resolve peer endpoint: %w", err)
 	}
 
@@ -275,7 +308,7 @@ func (m *Manager) createTunnel(localIP, dnsIP netip.Addr, data control.WgConnect
 	if err != nil {
 		cancel()
 		wgDevice.Close()
-		ns.Close()
+		_ = ns.Close()
 		return nil, fmt.Errorf("parse server allowed IP: %w", err)
 	}
 
@@ -292,7 +325,7 @@ func (m *Manager) createTunnel(localIP, dnsIP netip.Addr, data control.WgConnect
 	if err := wgDevice.AddPeer(peerCfg); err != nil {
 		cancel()
 		wgDevice.Close()
-		ns.Close()
+		_ = ns.Close()
 		return nil, fmt.Errorf("add peer: %w", err)
 	}
 
@@ -300,7 +333,7 @@ func (m *Manager) createTunnel(localIP, dnsIP netip.Addr, data control.WgConnect
 	if err := wgDevice.Up(); err != nil {
 		cancel()
 		wgDevice.Close()
-		ns.Close()
+		_ = ns.Close()
 		return nil, fmt.Errorf("bring device up: %w", err)
 	}
 
@@ -384,14 +417,14 @@ func (m *Manager) ping(ctx context.Context, t *activeTunnel, serverIP string) er
 }
 
 // handleReconnect handles the reconnect message.
-func (m *Manager) handleReconnect(msg control.Message) error {
+func (m *Manager) handleReconnect(_ control.Message) error {
 	m.logger.Info("received reconnect command")
 	go m.requestRecovery("server requested reconnect")
 	return nil
 }
 
 // handleTerminate handles the terminate message.
-func (m *Manager) handleTerminate(msg control.Message) error {
+func (m *Manager) handleTerminate(_ control.Message) error {
 	m.logger.Info("received terminate command")
 	m.closeTunnel(StateDisconnected)
 	return nil
@@ -416,7 +449,7 @@ func (m *Manager) closeTunnel(nextState TunnelState) {
 
 	done := make(chan struct{})
 	go func() {
-		t.group.Wait()
+		_ = t.group.Wait()
 		close(done)
 	}()
 
@@ -453,6 +486,59 @@ func serverAllowedPrefix(serverIP string) (netip.Prefix, error) {
 	return netip.PrefixFrom(addr, bits), nil
 }
 
+func (m *Manager) recoveryInterval() time.Duration {
+	if m.recoveryEvery > 0 {
+		return m.recoveryEvery
+	}
+	return 3 * time.Second
+}
+
+func (m *Manager) shouldContinueRecovery() bool {
+	if m.ctx == nil {
+		return false
+	}
+	if m.State() != StateReconnecting || m.tunnel.Load() != nil {
+		return false
+	}
+	return true
+}
+
+func (m *Manager) recoverySender() (func(ctx context.Context, msgType string, data any) error, bool) {
+	if m.sendControlData != nil {
+		return m.sendControlData, true
+	}
+	if m.control != nil && m.control.Connected() {
+		return m.control.SendData, true
+	}
+	return nil, false
+}
+
+func (m *Manager) sendRecoveryRegister(sendControlData func(ctx context.Context, msgType string, data any) error, reason string) bool {
+	sendCtx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	err := sendControlData(sendCtx, control.MsgWgRegister, control.WgRegisterData{
+		PublicKey:           m.PublicKey(),
+		BackwardsCompatible: true,
+	})
+	cancel()
+	if err != nil {
+		m.logger.Warn("failed to send recovery registration", "reason", reason, "error", err)
+		return false
+	}
+	return true
+}
+
+func (m *Manager) sendRecoveryPing(sendControlData func(ctx context.Context, msgType string, data any) error, reason string) error {
+	sendCtx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	err := sendControlData(sendCtx, control.MsgPingRequest, control.PingRequestData{
+		NoCloud: m.cfg.NoCloud,
+	})
+	cancel()
+	if err != nil {
+		m.logger.Warn("failed to request tunnel recovery", "reason", reason, "error", err)
+	}
+	return err
+}
+
 func (m *Manager) requestRecovery(reason string) {
 	m.closeTunnel(StateReconnecting)
 
@@ -463,68 +549,35 @@ func (m *Manager) requestRecovery(reason string) {
 	go func() {
 		defer m.recoveryActive.Store(false)
 
-		interval := m.recoveryEvery
-		if interval <= 0 {
-			interval = 3 * time.Second
-		}
+		interval := m.recoveryInterval()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		firstAttempt := true
 		registerSent := false
 		for {
-			if m.ctx == nil {
-				return
-			}
-
 			select {
 			case <-m.ctx.Done():
 				return
 			default:
 			}
 
-			if m.State() != StateReconnecting || m.tunnel.Load() != nil {
+			if !m.shouldContinueRecovery() {
 				return
 			}
 
-			controlConnected := m.control != nil && m.control.Connected()
-			if m.sendControlData != nil {
-				controlConnected = true
-			}
-			if !controlConnected {
+			sendControlData, ready := m.recoverySender()
+			if !ready {
 				if firstAttempt {
 					m.logger.Info("waiting for control plane before tunnel recovery", "reason", reason)
 					firstAttempt = false
 				}
 			} else {
-				sendControlData := m.sendControlData
-				if sendControlData == nil {
-					sendControlData = m.control.SendData
-				}
-
 				if !registerSent {
-					sendCtx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
-					err := sendControlData(sendCtx, control.MsgWgRegister, control.WgRegisterData{
-						PublicKey:           m.PublicKey(),
-						BackwardsCompatible: true,
-					})
-					cancel()
-					if err != nil {
-						m.logger.Warn("failed to send recovery registration", "reason", reason, "error", err)
-					} else {
-						registerSent = true
-					}
+					registerSent = m.sendRecoveryRegister(sendControlData, reason)
 				}
 
-				sendCtx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
-				err := sendControlData(sendCtx, control.MsgPingRequest, control.PingRequestData{
-					NoCloud: m.cfg.NoCloud,
-				})
-				cancel()
-
-				if err != nil {
-					m.logger.Warn("failed to request tunnel recovery", "reason", reason, "error", err)
-				} else if firstAttempt {
+				if err := m.sendRecoveryPing(sendControlData, reason); err == nil && firstAttempt {
 					m.logger.Info("requested tunnel recovery", "reason", reason)
 					firstAttempt = false
 				}

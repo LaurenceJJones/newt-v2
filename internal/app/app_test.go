@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/netip"
 	"sync"
@@ -15,18 +14,17 @@ import (
 	"github.com/fosrl/newt/internal/control"
 	"github.com/fosrl/newt/internal/health"
 	"github.com/fosrl/newt/internal/lifecycle"
-	"github.com/fosrl/newt/internal/proxy"
+	"github.com/fosrl/newt/internal/expose"
 	"github.com/fosrl/newt/internal/tunnel"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+func testLogger() *slog.Logger { return pkglogger.Discard() }
 
 func TestTunnelLifecycleSeedsAndClearsManagers(t *testing.T) {
 	a := &App{
 		logger: testLogger(),
-		proxy:  proxy.NewManager(nil, testLogger()),
+		proxy:  expose.NewManager(nil, testLogger()),
 		health: health.NewMonitor(nil, false, testLogger()),
 	}
 
@@ -232,7 +230,7 @@ func TestRegisterRetryStartsAndStopsOnTunnelConnect(t *testing.T) {
 			}
 			return nil
 		},
-		proxy:  proxy.NewManager(nil, testLogger()),
+		proxy:  expose.NewManager(nil, testLogger()),
 		health: health.NewMonitor(nil, false, testLogger()),
 	}
 
@@ -280,7 +278,7 @@ func TestHandleControlDisconnectStopsRetryWithoutTearingDownDataPlane(t *testing
 			}
 			return nil
 		},
-		proxy:  proxy.NewManager(nil, testLogger()),
+		proxy:  expose.NewManager(nil, testLogger()),
 		health: health.NewMonitor(nil, false, testLogger()),
 	}
 

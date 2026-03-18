@@ -1,8 +1,7 @@
-package proxy
+package expose
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -10,11 +9,10 @@ import (
 
 	"github.com/fosrl/newt/internal/control"
 	"github.com/fosrl/newt/internal/lifecycle"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
-func testProxyLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+func testProxyLogger() *slog.Logger { return pkglogger.Discard() }
 
 func TestParseTargetStringRequiresListenIP(t *testing.T) {
 	m := NewManager(nil, testProxyLogger())

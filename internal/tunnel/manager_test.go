@@ -3,14 +3,13 @@ package tunnel
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/netip"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/fosrl/newt/internal/control"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
 func TestInfoReturnsActiveTunnelMetadata(t *testing.T) {
@@ -65,7 +64,7 @@ func TestInfoWithoutTunnelReturnsCurrentState(t *testing.T) {
 func TestRequestRecoverySendsOneRegisterAndRepeatedPingRequests(t *testing.T) {
 	m := &Manager{
 		control:       control.NewClient(control.ClientConfig{}, nil),
-		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger:        pkglogger.Discard(),
 		recoveryEvery: 10 * time.Millisecond,
 	}
 	m.state.Store(int32(StateConnected))
@@ -116,7 +115,7 @@ func TestRequestRecoverySendsOneRegisterAndRepeatedPingRequests(t *testing.T) {
 }
 
 func TestHandleConnectKeepsExistingTunnelForIdenticalConfig(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := pkglogger.Discard()
 	data := control.WgConnectData{
 		Endpoint:  "198.51.100.10:51820",
 		RelayPort: 21820,

@@ -4,13 +4,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/fosrl/newt/internal/app"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 	"github.com/fosrl/newt/pkg/version"
 )
 
@@ -29,7 +29,7 @@ func run() error {
 	}
 
 	// Setup logger
-	logger := setupLogger(cfg.LogLevel)
+	logger := pkglogger.New(cfg.LogLevel)
 	logger.Info("newt starting", "version", version.Short())
 
 	// Create application
@@ -59,28 +59,4 @@ func run() error {
 
 	logger.Info("shutdown complete")
 	return nil
-}
-
-// setupLogger creates a structured logger based on the log level.
-func setupLogger(level string) *slog.Logger {
-	var logLevel slog.Level
-	switch level {
-	case "DEBUG":
-		logLevel = slog.LevelDebug
-	case "INFO":
-		logLevel = slog.LevelInfo
-	case "WARN":
-		logLevel = slog.LevelWarn
-	case "ERROR", "FATAL":
-		logLevel = slog.LevelError
-	default:
-		logLevel = slog.LevelInfo
-	}
-
-	opts := &slog.HandlerOptions{
-		Level: logLevel,
-	}
-
-	handler := slog.NewTextHandler(os.Stderr, opts)
-	return slog.New(handler)
 }

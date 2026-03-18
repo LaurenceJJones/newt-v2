@@ -191,7 +191,7 @@ func sudoGroup() string {
 	if err != nil {
 		return "sudo"
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	hasWheel := false
 	hasSudo := false

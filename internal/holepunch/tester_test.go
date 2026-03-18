@@ -1,13 +1,13 @@
 package holepunch
 
 import (
-	"io"
-	"log/slog"
 	"testing"
+
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
 func TestTesterResolveEndpointPreservesExplicitPort(t *testing.T) {
-	tester := NewTester(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tester := NewTester(nil, pkglogger.Discard())
 
 	addr, err := tester.resolveEndpoint("127.0.0.1:43181")
 	if err != nil {
@@ -20,7 +20,7 @@ func TestTesterResolveEndpointPreservesExplicitPort(t *testing.T) {
 }
 
 func TestTesterResolveEndpointDefaultsRelayPortWhenMissing(t *testing.T) {
-	tester := NewTester(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tester := NewTester(nil, pkglogger.Discard())
 
 	addr, err := tester.resolveEndpoint("127.0.0.1")
 	if err != nil {

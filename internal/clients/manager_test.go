@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net"
 	"sync/atomic"
@@ -16,11 +15,10 @@ import (
 	"github.com/fosrl/newt/internal/control"
 	"github.com/fosrl/newt/internal/holepunch"
 	"github.com/fosrl/newt/internal/tunnel"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+func testLogger() *slog.Logger { return pkglogger.Discard() }
 
 type stubPacketConn struct {
 	closed bool

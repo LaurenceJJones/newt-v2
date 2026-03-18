@@ -1,4 +1,4 @@
-package proxy
+package forwarder
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 	netpacket "github.com/fosrl/newt/internal/netstack/packet"
 	"github.com/fosrl/newt/internal/netstack/rewrite"
 	stackrules "github.com/fosrl/newt/internal/netstack/rules"
-	"github.com/fosrl/newt/logger"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
@@ -102,14 +102,14 @@ func (e *Engine) HandleIncomingPacket(packet []byte) bool {
 	dstPort := parsed.DestinationPort
 	protocol := parsed.Protocol
 	if protocol == header.ICMPv4ProtocolNumber {
-		logger.Debug("HandleIncomingPacket: ICMP packet from %s to %s", srcAddr, dstAddr)
+		pkglogger.Debug("HandleIncomingPacket: ICMP packet from %s to %s", srcAddr, dstAddr)
 	} else if dstPort == 0 && protocol != header.TCPProtocolNumber && protocol != header.UDPProtocolNumber {
-		logger.Debug("HandleIncomingPacket: Unknown protocol %d from %s to %s", protocol, srcAddr, dstAddr)
+		pkglogger.Debug("HandleIncomingPacket: Unknown protocol %d from %s to %s", protocol, srcAddr, dstAddr)
 	}
 
 	decision, err := forwarding.PlanInbound(context.Background(), packet, parsed, e.subnetLookup, e.rewriteState, e.rewriteResolver)
 	if err != nil {
-		logger.Debug("HandleIncomingPacket: forwarding plan failed: %v", err)
+		pkglogger.Debug("HandleIncomingPacket: forwarding plan failed: %v", err)
 		return false
 	}
 	if decision.Action != forwarding.ActionInject {
@@ -117,11 +117,11 @@ func (e *Engine) HandleIncomingPacket(packet []byte) bool {
 	}
 
 	if decision.Rule != nil {
-		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)",
+		pkglogger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d)",
 			srcAddr, dstAddr, protocol, dstPort)
 		if decision.Rule.RewriteTo != "" {
 			if rewritten, ok := e.rewriteState.DestinationRewrite(srcAddr.String(), dstAddr.String(), dstPort, uint8(protocol)); ok && rewritten.IsLoopback() {
-				logger.Debug("Target is loopback, not rewriting packet - handlers will use rewrite table")
+				pkglogger.Debug("Target is loopback, not rewriting packet - handlers will use rewrite table")
 			}
 		}
 	}
@@ -130,7 +130,7 @@ func (e *Engine) HandleIncomingPacket(packet []byte) bool {
 		Payload: buffer.MakeWithData(decision.Packet),
 	})
 	e.proxyEp.InjectInbound(header.IPv4ProtocolNumber, pkb)
-	logger.Debug("HandleIncomingPacket: Injected packet into proxy stack (proto=%d)", protocol)
+	pkglogger.Debug("HandleIncomingPacket: Injected packet into proxy stack (proto=%d)", protocol)
 	return true
 }
 
@@ -144,7 +144,7 @@ func (e *Engine) ReadOutgoingPacket() *buffer.View {
 
 	select {
 	case icmpReply := <-e.icmpReplies:
-		logger.Debug("ReadOutgoingPacket: Returning ICMP reply packet (%d bytes)", len(icmpReply))
+		pkglogger.Debug("ReadOutgoingPacket: Returning ICMP reply packet (%d bytes)", len(icmpReply))
 		return buffer.NewViewWithData(icmpReply)
 	default:
 	}
@@ -163,7 +163,7 @@ func (e *Engine) ReadOutgoingPacket() *buffer.View {
 		return view
 	}
 	if parsed.Protocol == header.ICMPv4ProtocolNumber {
-		logger.Debug("ReadOutgoingPacket: ICMP packet from %s to %s", parsed.SourceAddr, parsed.DestinationAddr)
+		pkglogger.Debug("ReadOutgoingPacket: ICMP packet from %s to %s", parsed.SourceAddr, parsed.DestinationAddr)
 		return view
 	}
 
@@ -187,13 +187,13 @@ func (e *Engine) QueueICMPReply(packet []byte) bool {
 
 	select {
 	case e.icmpReplies <- packet:
-		logger.Debug("QueueICMPReply: Queued ICMP reply packet (%d bytes)", len(packet))
+		pkglogger.Debug("QueueICMPReply: Queued ICMP reply packet (%d bytes)", len(packet))
 		if e.notifiable != nil {
 			e.notifiable.WriteNotify()
 		}
 		return true
 	default:
-		logger.Info("QueueICMPReply: ICMP reply channel full, dropping packet")
+		pkglogger.Warn("QueueICMPReply: ICMP reply channel full, dropping packet")
 		return false
 	}
 }

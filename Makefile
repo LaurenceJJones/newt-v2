@@ -1,6 +1,11 @@
-.PHONY: all local clean test tidy docker-build docker-build-release
+.PHONY: all local clean test tidy lint docker-build docker-build-release
 
 all: local
+
+GO ?= go
+GOLANGCI_LINT ?= golangci-lint
+BIN_DIR ?= ./bin
+MAIN_PKG := ./cmd/newt
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -11,16 +16,20 @@ LDFLAGS = -X github.com/fosrl/newt/pkg/version.Version=$(VERSION) \
           -X github.com/fosrl/newt/pkg/version.BuildDate=$(BUILD_DATE)
 
 local:
-	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ./bin/newt ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt $(MAIN_PKG)
 
 clean:
-	rm -rf ./bin
+	rm -rf $(BIN_DIR)
 
 test:
-	go test ./...
+	$(GO) test ./...
+
+lint:
+	$(GOLANGCI_LINT) run ./...
 
 tidy:
-	go mod tidy
+	$(GO) mod tidy
 
 docker-build:
 	docker build -t fosrl/newt:latest .
@@ -57,31 +66,41 @@ go-build-release: \
     go-build-release-freebsd-arm64
 
 go-build-release-linux-arm64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/newt_linux_arm64 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_linux_arm64 $(MAIN_PKG)
 
 go-build-release-linux-arm32-v7:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags "$(LDFLAGS)" -o bin/newt_linux_arm32 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_linux_arm32 $(MAIN_PKG)
 
 go-build-release-linux-arm32-v6:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 go build -ldflags "$(LDFLAGS)" -o bin/newt_linux_arm32v6 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=6 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_linux_arm32v6 $(MAIN_PKG)
 
 go-build-release-linux-amd64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/newt_linux_amd64 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_linux_amd64 $(MAIN_PKG)
 
 go-build-release-linux-riscv64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go build -ldflags "$(LDFLAGS)" -o bin/newt_linux_riscv64 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_linux_riscv64 $(MAIN_PKG)
 
 go-build-release-darwin-arm64:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/newt_darwin_arm64 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_darwin_arm64 $(MAIN_PKG)
 
 go-build-release-darwin-amd64:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/newt_darwin_amd64 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_darwin_amd64 $(MAIN_PKG)
 
 go-build-release-windows-amd64:
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/newt_windows_amd64.exe ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_windows_amd64.exe $(MAIN_PKG)
 
 go-build-release-freebsd-amd64:
-	CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/newt_freebsd_amd64 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_freebsd_amd64 $(MAIN_PKG)
 
 go-build-release-freebsd-arm64:
-	CGO_ENABLED=0 GOOS=freebsd GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/newt_freebsd_arm64 ./cmd/newt
+	mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=freebsd GOARCH=arm64 $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/newt_freebsd_arm64 $(MAIN_PKG)

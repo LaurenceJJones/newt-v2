@@ -2,16 +2,15 @@ package holepunch
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net"
 	"testing"
 	"time"
+
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+func testLogger() *slog.Logger { return pkglogger.Discard() }
 
 func TestSyncExitNodesReplacesExistingNodes(t *testing.T) {
 	m := NewManager("newt-id", "newt", "public-key", testLogger())

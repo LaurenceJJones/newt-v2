@@ -1,4 +1,4 @@
-package proxy
+package forwarder
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 
 	"github.com/fosrl/newt/internal/netstack/forwarding"
 	"github.com/fosrl/newt/internal/netstack/relay"
-	"github.com/fosrl/newt/logger"
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -49,26 +49,26 @@ func (h *TCPHandler) InstallTCPHandler() error {
 }
 
 func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.TransportEndpointID) {
-	defer netstackConn.Close()
+	defer func() { _ = netstackConn.Close() }()
 
 	srcIP, ok := parseTransportAddress(id.RemoteAddress)
 	if !ok {
-		logger.Info("TCP Forwarder: Failed to parse source IP %s", id.RemoteAddress)
+		pkglogger.Debug("TCP Forwarder: Failed to parse source IP %s", id.RemoteAddress)
 		return
 	}
 	srcPort := id.RemotePort
 	dstIP, ok := parseTransportAddress(id.LocalAddress)
 	if !ok {
-		logger.Info("TCP Forwarder: Failed to parse destination IP %s", id.LocalAddress)
+		pkglogger.Debug("TCP Forwarder: Failed to parse destination IP %s", id.LocalAddress)
 		return
 	}
 	dstPort := id.LocalPort
 
-	logger.Info("TCP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
+	pkglogger.Debug("TCP Forwarder: Handling connection %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
 
 	target := forwarding.ResolveTarget(srcIP, dstIP, dstPort, uint8(tcp.ProtocolNumber), h.engine)
 	if target.Rewritten {
-		logger.Info("TCP Forwarder: Using rewritten destination %s (original: %s)", target.Effective.Addr(), target.Original.Addr())
+		pkglogger.Debug("TCP Forwarder: Using rewritten destination %s (original: %s)", target.Effective.Addr(), target.Original.Addr())
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), tcpConnectTimeout)
@@ -77,11 +77,11 @@ func (h *TCPHandler) handleTCPConn(netstackConn *gonet.TCPConn, id stack.Transpo
 	var d net.Dialer
 	targetConn, err := d.DialContext(ctx, "tcp", target.Effective.String())
 	if err != nil {
-		logger.Info("TCP Forwarder: Failed to connect to %s: %v", target.Effective, err)
+		pkglogger.Warn("TCP Forwarder: Failed to connect to %s: %v", target.Effective, err)
 		return
 	}
-	defer targetConn.Close()
+	defer func() { _ = targetConn.Close() }()
 
-	logger.Info("TCP Forwarder: Successfully connected to %s, starting bidirectional copy", target.Effective)
+	pkglogger.Debug("TCP Forwarder: Successfully connected to %s, starting bidirectional copy", target.Effective)
 	relay.TCP(netstackConn, targetConn, relay.TCPOptions{WaitTimeout: tcpWaitTimeout})
 }

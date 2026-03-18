@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
+func testLogger() *slog.Logger { return pkglogger.Discard() }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
