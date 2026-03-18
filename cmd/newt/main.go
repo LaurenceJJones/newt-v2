@@ -22,6 +22,14 @@ func main() {
 }
 
 func run() error {
+	handled, err := handleSubcommand(os.Args[1:], os.Stdout, os.Stderr)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
+	}
+
 	// Load configuration from env and flags
 	cfg, err := app.LoadConfig()
 	if err != nil {
