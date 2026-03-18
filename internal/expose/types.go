@@ -1,5 +1,5 @@
 // Package proxy provides TCP and UDP proxying through the WireGuard tunnel.
-package proxy
+package expose
 
 import (
 	"net"

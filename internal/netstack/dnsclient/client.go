@@ -352,9 +352,10 @@ func (c *Client) exchange(ctx context.Context, server netip.Addr, q dnsmessage.Q
 		}
 		_ = conn.Close()
 		if err != nil {
-			if err == context.Canceled {
+			switch err {
+			case context.Canceled:
 				err = ErrCanceled
-			} else if err == context.DeadlineExceeded {
+			case context.DeadlineExceeded:
 				err = ErrTimeout
 			}
 			return dnsmessage.Parser{}, dnsmessage.Header{}, err

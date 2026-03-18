@@ -22,9 +22,9 @@ type Resolver interface {
 }
 
 type Callbacks struct {
-	Resolve Resolver
-	DialTCP func(context.Context, netip.AddrPort) (net.Conn, error)
-	DialUDP func(netip.AddrPort, netip.AddrPort) (net.Conn, error)
+	Resolve  Resolver
+	DialTCP  func(context.Context, netip.AddrPort) (net.Conn, error)
+	DialUDP  func(netip.AddrPort, netip.AddrPort) (net.Conn, error)
 	DialPing func(netip.Addr) (net.Conn, error)
 }
 
@@ -58,9 +58,10 @@ func DialContext(ctx context.Context, network, address string, cb Callbacks) (ne
 		select {
 		case <-ctx.Done():
 			err := ctx.Err()
-			if err == context.Canceled {
+			switch err {
+			case context.Canceled:
 				err = dnsclient.ErrCanceled
-			} else if err == context.DeadlineExceeded {
+			case context.DeadlineExceeded:
 				err = dnsclient.ErrTimeout
 			}
 			return nil, &net.OpError{Op: "dial", Err: err}

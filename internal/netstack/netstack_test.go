@@ -26,7 +26,7 @@ func TestPortRangeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProxySubnetRulesReturnNetipTypes(t *testing.T) {
+func TestForwardingRulesReturnNetipTypes(t *testing.T) {
 	tunDev, ns, err := CreateTUN(
 		[]netip.Addr{netip.MustParseAddr("10.0.0.1")},
 		[]netip.Addr{netip.MustParseAddr("1.1.1.1")},
@@ -35,14 +35,14 @@ func TestProxySubnetRulesReturnNetipTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create tun: %v", err)
 	}
-	defer tunDev.Close()
-	defer ns.Close()
+	defer func() { _ = tunDev.Close() }()
+	defer func() { _ = ns.Close() }()
 
 	src := netip.MustParsePrefix("10.0.0.0/24")
 	dst := netip.MustParsePrefix("192.168.0.0/24")
-	ns.AddProxySubnetRule(src, dst, "example.internal", []PortRange{{Min: 443, Max: 443, Protocol: "tcp"}}, true)
+	ns.AddForwardingRule(src, dst, "example.internal", []PortRange{{Min: 443, Max: 443, Protocol: "tcp"}}, true)
 
-	rules := ns.ProxySubnetRules()
+	rules := ns.ForwardingRules()
 	if len(rules) != 1 {
 		t.Fatalf("expected 1 rule, got %d", len(rules))
 	}

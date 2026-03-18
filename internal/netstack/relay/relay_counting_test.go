@@ -8,8 +8,8 @@ import (
 
 func TestWrapWriteCounterCountsWrites(t *testing.T) {
 	left, right := net.Pipe()
-	defer left.Close()
-	defer right.Close()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
 
 	var counter atomic.Int64
 	wrapped := WrapWriteCounter(left, &counter)

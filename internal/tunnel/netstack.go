@@ -139,7 +139,7 @@ func (n *NetStack) pingOnce(ctx context.Context, dst string, timeout time.Durati
 	if err != nil {
 		return 0, fmt.Errorf("failed to create ICMP socket: %w", err)
 	}
-	defer socket.Close()
+	defer func() { _ = socket.Close() }()
 
 	if tcpConn, ok := socket.(interface{ SetReadBuffer(int) error }); ok {
 		_ = tcpConn.SetReadBuffer(64 * 1024)

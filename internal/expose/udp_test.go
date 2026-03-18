@@ -1,4 +1,4 @@
-package proxy
+package expose
 
 import (
 	"context"
@@ -108,19 +108,11 @@ func (c *testConn) Close() error {
 	return nil
 }
 
-func (c *testConn) LocalAddr() net.Addr                { return &net.UDPAddr{} }
-func (c *testConn) RemoteAddr() net.Addr               { return &net.UDPAddr{} }
-func (c *testConn) SetDeadline(time.Time) error        { return nil }
-func (c *testConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *testConn) SetWriteDeadline(time.Time) error   { return nil }
-func (c *testConn) writesSnapshot() [][]byte {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([][]byte, len(c.writes))
-	copy(out, c.writes)
-	return out
-}
-
+func (c *testConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
+func (c *testConn) RemoteAddr() net.Addr             { return &net.UDPAddr{} }
+func (c *testConn) SetDeadline(time.Time) error      { return nil }
+func (c *testConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *testConn) SetWriteDeadline(time.Time) error { return nil }
 func TestUDPReadFromTargetForwardsResponsesAndUpdatesStats(t *testing.T) {
 	listener := &testPacketConn{}
 	targetConn := newTestConn()
@@ -221,10 +213,10 @@ type testNetDialer struct {
 	listener net.PacketConn
 }
 
-func (d *testNetDialer) DialTCP(addr string) (net.Conn, error)            { return nil, nil }
-func (d *testNetDialer) DialUDP(laddr, raddr string) (net.Conn, error)    { return nil, nil }
-func (d *testNetDialer) ListenTCP(addr string) (net.Listener, error)      { return nil, nil }
-func (d *testNetDialer) ListenUDP(addr string) (net.PacketConn, error)    { return d.listener, nil }
+func (d *testNetDialer) DialTCP(addr string) (net.Conn, error)         { return nil, nil }
+func (d *testNetDialer) DialUDP(laddr, raddr string) (net.Conn, error) { return nil, nil }
+func (d *testNetDialer) ListenTCP(addr string) (net.Listener, error)   { return nil, nil }
+func (d *testNetDialer) ListenUDP(addr string) (net.PacketConn, error) { return d.listener, nil }
 
 func TestUDPStartExitsOnContextCancel(t *testing.T) {
 	listener := &testPacketConn{}

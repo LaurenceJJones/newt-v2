@@ -1,4 +1,4 @@
-package proxy
+package expose
 
 import (
 	"context"
@@ -70,11 +70,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.group = lifecycle.NewGroup(ctx)
 	m.flushPendingTargets()
 
-	// Register message handlers
-	m.controlClient.Register(control.MsgTCPAdd, m.handleAddTCP)
-	m.controlClient.Register(control.MsgTCPRemove, m.handleRemoveTCP)
-	m.controlClient.Register(control.MsgUDPAdd, m.handleAddUDP)
-	m.controlClient.Register(control.MsgUDPRemove, m.handleRemoveUDP)
+	m.registerHandlers()
 
 	m.logger.Info("proxy manager started")
 
@@ -87,8 +83,18 @@ func (m *Manager) Start(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// SetDialer sets the dialer for creating connections.
-// This is called when the tunnel connects.
+func (m *Manager) registerHandlers() {
+	if m.controlClient == nil {
+		return
+	}
+
+	m.controlClient.Register(control.MsgTCPAdd, m.handleAddTCP)
+	m.controlClient.Register(control.MsgTCPRemove, m.handleRemoveTCP)
+	m.controlClient.Register(control.MsgUDPAdd, m.handleAddUDP)
+	m.controlClient.Register(control.MsgUDPRemove, m.handleRemoveUDP)
+}
+
+// SetDialer sets the dialer used for outbound proxy connections.
 func (m *Manager) SetDialer(dialer NetDialer) {
 	m.mu.Lock()
 	m.dialer = dialer
@@ -105,7 +111,7 @@ func (m *Manager) SetListenIP(ip string) {
 	m.mu.Unlock()
 }
 
-// ListenIP returns the currently configured tunnel listen IP.
+// ListenIP returns the currently configured listen IP for proxy listeners.
 func (m *Manager) ListenIP() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -157,17 +163,7 @@ func (m *Manager) handleAdd(msg control.Message, protocol string) error {
 		return fmt.Errorf("unmarshal %s add data: %w", protocol, err)
 	}
 
-	for _, targetStr := range data.Targets {
-		target, err := m.parseTargetString(targetStr, protocol)
-		if err != nil {
-			m.logger.Warn("invalid target", "protocol", protocol, "target", targetStr, "error", err)
-			continue
-		}
-		if err := m.addTarget(target); err != nil {
-			m.logger.Warn("add target failed", "protocol", protocol, "target", targetStr, "error", err)
-		}
-	}
-
+	m.applyTargetStrings(data.Targets, protocol, m.addTarget, "add target failed")
 	return nil
 }
 
@@ -177,18 +173,23 @@ func (m *Manager) handleRemove(msg control.Message, protocol string) error {
 		return fmt.Errorf("unmarshal %s remove data: %w", protocol, err)
 	}
 
-	for _, targetStr := range data.Targets {
+	m.applyTargetStrings(data.Targets, protocol, func(target Target) error {
+		return m.removeTarget(target.Protocol, target.ListenAddr)
+	}, "remove target failed")
+	return nil
+}
+
+func (m *Manager) applyTargetStrings(targets []string, protocol string, apply func(Target) error, errorMsg string) {
+	for _, targetStr := range targets {
 		target, err := m.parseTargetString(targetStr, protocol)
 		if err != nil {
 			m.logger.Warn("invalid target", "protocol", protocol, "target", targetStr, "error", err)
 			continue
 		}
-		if err := m.removeTarget(target.Protocol, target.ListenAddr); err != nil {
-			m.logger.Warn("remove target failed", "protocol", protocol, "target", targetStr, "error", err)
+		if err := apply(target); err != nil {
+			m.logger.Warn(errorMsg, "protocol", protocol, "target", targetStr, "error", err)
 		}
 	}
-
-	return nil
 }
 
 // SyncTargets reconciles the active proxy targets with the desired target set.
@@ -196,33 +197,8 @@ func (m *Manager) SyncTargets(targets control.TargetsByType) error {
 	// Build set of targets to keep
 	keep := make(map[TargetKey]bool)
 
-	// Add TCP targets
-	for _, targetStr := range targets.TCP {
-		target, err := m.parseTargetString(targetStr, "tcp")
-		if err != nil {
-			m.logger.Warn("invalid tcp target", "error", err)
-			continue
-		}
-		key := targetKey(target)
-		keep[key] = true
-		if err := m.addTarget(target); err != nil {
-			m.logger.Warn("add tcp target failed", "error", err)
-		}
-	}
-
-	// Add UDP targets
-	for _, targetStr := range targets.UDP {
-		target, err := m.parseTargetString(targetStr, "udp")
-		if err != nil {
-			m.logger.Warn("invalid udp target", "error", err)
-			continue
-		}
-		key := targetKey(target)
-		keep[key] = true
-		if err := m.addTarget(target); err != nil {
-			m.logger.Warn("add udp target failed", "error", err)
-		}
-	}
+	m.collectTargetStrings(targets.TCP, "tcp", keep)
+	m.collectTargetStrings(targets.UDP, "udp", keep)
 
 	// Remove targets not in sync
 	m.mu.Lock()
@@ -250,6 +226,13 @@ func (m *Manager) SyncTargets(targets control.TargetsByType) error {
 	}
 
 	return nil
+}
+
+func (m *Manager) collectTargetStrings(targets []string, protocol string, keep map[TargetKey]bool) {
+	m.applyTargetStrings(targets, protocol, func(target Target) error {
+		keep[targetKey(target)] = true
+		return m.addTarget(target)
+	}, "add target failed")
 }
 
 // addTarget adds or updates a proxy target.
@@ -393,25 +376,12 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 // AddTCPTargets adds TCP proxy targets from target strings.
 func (m *Manager) AddTCPTargets(targets []string) {
-	m.addTargetsFromStrings(targets, "tcp")
+	m.applyTargetStrings(targets, "tcp", m.addTarget, "add target failed")
 }
 
 // AddUDPTargets adds UDP proxy targets from target strings.
 func (m *Manager) AddUDPTargets(targets []string) {
-	m.addTargetsFromStrings(targets, "udp")
-}
-
-func (m *Manager) addTargetsFromStrings(targets []string, protocol string) {
-	for _, targetStr := range targets {
-		target, err := m.parseTargetString(targetStr, protocol)
-		if err != nil {
-			m.logger.Warn("invalid target", "protocol", protocol, "target", targetStr, "error", err)
-			continue
-		}
-		if err := m.addTarget(target); err != nil {
-			m.logger.Warn("add target failed", "protocol", protocol, "target", targetStr, "error", err)
-		}
-	}
+	m.applyTargetStrings(targets, "udp", m.addTarget, "add target failed")
 }
 
 func (m *Manager) stopProxy(proxy *activeProxy) {

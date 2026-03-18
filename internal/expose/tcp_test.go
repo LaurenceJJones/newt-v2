@@ -1,4 +1,4 @@
-package proxy
+package expose
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 )
 
 type testListener struct {
-	connCh  chan net.Conn
-	closed  atomic.Bool
+	connCh   chan net.Conn
+	closed   atomic.Bool
 	deadline atomic.Int64
 }
 
@@ -66,7 +66,7 @@ func TestTCPHandleConnectionUpdatesStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen target: %v", err)
 	}
-	defer targetListener.Close()
+	defer func() { _ = targetListener.Close() }()
 
 	serverDone := make(chan struct{})
 	go func() {
@@ -75,7 +75,7 @@ func TestTCPHandleConnectionUpdatesStats(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		buf := make([]byte, 4)
 		if _, err := io.ReadFull(conn, buf); err != nil {
@@ -88,7 +88,7 @@ func TestTCPHandleConnectionUpdatesStats(t *testing.T) {
 	}()
 
 	clientConn, proxyConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	p := NewTCPProxy(Target{TargetAddr: targetListener.Addr().String()}, &tcpTestDialer{}, slog.Default())
 	p.ctx = context.Background()
@@ -155,7 +155,7 @@ func TestTCPStartExitsOnContextCancel(t *testing.T) {
 func TestTCPStopClosesListenerAndWaitsForConnections(t *testing.T) {
 	listener := newTestListener()
 	clientConn, proxyConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	p := NewTCPProxy(Target{}, &tcpTestDialer{listener: listener}, slog.Default())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -184,7 +184,7 @@ func TestTCPStartAcceptsConnectionsAndCountsThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen target: %v", err)
 	}
-	defer targetListener.Close()
+	defer func() { _ = targetListener.Close() }()
 
 	serverDone := make(chan struct{})
 	go func() {
@@ -193,7 +193,7 @@ func TestTCPStartAcceptsConnectionsAndCountsThem(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = io.Copy(io.Discard, conn)
 	}()
 

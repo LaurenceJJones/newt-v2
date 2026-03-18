@@ -10,10 +10,10 @@ import (
 func TestTCPRelaysBidirectionally(t *testing.T) {
 	originLocal, originRemote := net.Pipe()
 	targetLocal, targetRemote := net.Pipe()
-	defer originLocal.Close()
-	defer originRemote.Close()
-	defer targetLocal.Close()
-	defer targetRemote.Close()
+	defer func() { _ = originLocal.Close() }()
+	defer func() { _ = originRemote.Close() }()
+	defer func() { _ = targetLocal.Close() }()
+	defer func() { _ = targetRemote.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -135,11 +135,11 @@ func (c *stubPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return len(p), nil
 }
 
-func (c *stubPacketConn) Close() error                       { return nil }
-func (c *stubPacketConn) LocalAddr() net.Addr                { return &net.UDPAddr{} }
-func (c *stubPacketConn) SetDeadline(time.Time) error        { return nil }
-func (c *stubPacketConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *stubPacketConn) SetWriteDeadline(time.Time) error   { return nil }
+func (c *stubPacketConn) Close() error                     { return nil }
+func (c *stubPacketConn) LocalAddr() net.Addr              { return &net.UDPAddr{} }
+func (c *stubPacketConn) SetDeadline(time.Time) error      { return nil }
+func (c *stubPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *stubPacketConn) SetWriteDeadline(time.Time) error { return nil }
 
 type timeoutError struct{}
 

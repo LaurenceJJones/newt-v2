@@ -1,4 +1,4 @@
-package proxy
+package expose
 
 import (
 	"context"
@@ -162,7 +162,7 @@ func (p *UDPProxy) getOrCreateSession(clientAddr net.Addr) *udpSession {
 	actual, loaded := p.sessions.LoadOrStore(key, session)
 	if loaded {
 		// Another goroutine created the session first
-		targetConn.Close()
+		_ = targetConn.Close()
 		return actual.(*udpSession)
 	}
 
@@ -177,7 +177,7 @@ func (p *UDPProxy) getOrCreateSession(clientAddr net.Addr) *udpSession {
 func (p *UDPProxy) readFromTarget(session *udpSession, key string) {
 	defer p.wg.Done()
 	defer func() {
-		session.targetConn.Close()
+		_ = session.targetConn.Close()
 		p.sessions.Delete(key)
 	}()
 
@@ -242,7 +242,7 @@ func (p *UDPProxy) cleanupSessions() {
 				session := value.(*udpSession)
 				if session.activity.Expired(now, udpSessionTimeout) {
 					p.logger.Debug("cleaning up expired session", "client", session.clientAddr)
-					session.targetConn.Close()
+					_ = session.targetConn.Close()
 					p.sessions.Delete(key)
 				}
 				return true
@@ -257,13 +257,13 @@ func (p *UDPProxy) Stop() error {
 		p.cancel()
 	}
 	if p.listener != nil {
-		p.listener.Close()
+		_ = p.listener.Close()
 	}
 
 	// Close all sessions
 	p.sessions.Range(func(key, value any) bool {
 		session := value.(*udpSession)
-		session.targetConn.Close()
+		_ = session.targetConn.Close()
 		return true
 	})
 

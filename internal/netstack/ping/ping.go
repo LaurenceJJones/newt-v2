@@ -131,7 +131,7 @@ func (pc *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	default:
 		return 0, fmt.Errorf("ping write: wrong net.Addr type")
 	}
-	if !((na.Is4() && pc.laddr.addr.Is4()) || (na.Is6() && pc.laddr.addr.Is6())) {
+	if (!na.Is4() || !pc.laddr.addr.Is4()) && (!na.Is6() || !pc.laddr.addr.Is6()) {
 		return 0, fmt.Errorf("ping write: mismatched protocols")
 	}
 

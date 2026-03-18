@@ -1,4 +1,4 @@
-package proxy
+package expose
 
 import (
 	"context"
@@ -15,10 +15,10 @@ import (
 
 // TCPProxy handles TCP proxying for a single target.
 type TCPProxy struct {
-	target    Target
-	dialer    NetDialer
-	listener  net.Listener
-	logger    *slog.Logger
+	target   Target
+	dialer   NetDialer
+	listener net.Listener
+	logger   *slog.Logger
 
 	// Statistics
 	bytesIn    atomic.Int64
@@ -97,7 +97,7 @@ func (p *TCPProxy) Start(ctx context.Context) error {
 // handleConnection proxies a single TCP connection.
 func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 	defer p.wg.Done()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Connect to target via regular network (not through tunnel)
 	// Targets are local services like localhost:8080
@@ -110,7 +110,7 @@ func (p *TCPProxy) handleConnection(clientConn net.Conn) {
 		p.errorCount.Add(1)
 		return
 	}
-	defer targetConn.Close()
+	defer func() { _ = targetConn.Close() }()
 
 	relay.TCP(
 		relay.WrapWriteCounter(clientConn, &p.bytesIn),
@@ -125,7 +125,7 @@ func (p *TCPProxy) Stop() error {
 		p.cancel()
 	}
 	if p.listener != nil {
-		p.listener.Close()
+		_ = p.listener.Close()
 	}
 
 	// Wait for connections with timeout

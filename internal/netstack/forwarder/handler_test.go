@@ -1,4 +1,4 @@
-package proxy
+package forwarder
 
 import (
 	"testing"
@@ -15,7 +15,7 @@ func TestInitializeAddsIPv4AndIPv6DefaultRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
-	defer handler.Close()
+	defer func() { _ = handler.Close() }()
 
 	if err := handler.Initialize(notifySink{}); err != nil {
 		t.Fatalf("initialize handler: %v", err)

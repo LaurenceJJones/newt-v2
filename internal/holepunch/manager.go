@@ -170,7 +170,7 @@ func (m *Manager) AddExitNode(node ExitNode) error {
 
 	m.startPunchLoop(state)
 
-	m.logger.Info("added exit node",
+	m.logger.Debug("added exit node",
 		"id", node.ID,
 		"endpoint", node.Endpoint,
 	)
@@ -213,7 +213,7 @@ func (m *Manager) RemoveExitNode(id string) {
 	if state, ok := m.nodes[id]; ok {
 		state.connected.Store(false)
 		delete(m.nodes, id)
-		m.logger.Info("removed exit node", "id", id)
+		m.logger.Debug("removed exit node", "id", id)
 	}
 }
 

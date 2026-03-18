@@ -139,7 +139,7 @@ func buildPeerConfig(cfg PeerConfig, updateOnly, endpointSpecified bool) (string
 	pubKeyHex := hex.EncodeToString(pubKeyBytes)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("public_key=%s\n", pubKeyHex))
+	_, _ = fmt.Fprintf(&sb, "public_key=%s\n", pubKeyHex)
 	if updateOnly {
 		sb.WriteString("update_only=true\n")
 	}
@@ -152,20 +152,20 @@ func buildPeerConfig(cfg PeerConfig, updateOnly, endpointSpecified bool) (string
 			if err != nil {
 				return "", fmt.Errorf("resolve endpoint: %w", err)
 			}
-			sb.WriteString(fmt.Sprintf("endpoint=%s\n", endpoint))
+			_, _ = fmt.Fprintf(&sb, "endpoint=%s\n", endpoint)
 		} else {
 			sb.WriteString("endpoint=0.0.0.0:0\n")
 		}
 	}
 
 	for _, prefix := range cfg.AllowedIPs {
-		sb.WriteString(fmt.Sprintf("allowed_ip=%s\n", prefix.String()))
+		_, _ = fmt.Fprintf(&sb, "allowed_ip=%s\n", prefix.String())
 	}
 
 	if endpointSpecified && cfg.Endpoint == "" {
 		sb.WriteString("persistent_keepalive_interval=0\n")
 	} else if cfg.PersistentKeepalive > 0 && cfg.Endpoint != "" {
-		sb.WriteString(fmt.Sprintf("persistent_keepalive_interval=%d\n", cfg.PersistentKeepalive))
+		_, _ = fmt.Fprintf(&sb, "persistent_keepalive_interval=%d\n", cfg.PersistentKeepalive)
 	}
 
 	return sb.String(), nil
@@ -189,14 +189,12 @@ func (d *Device) RemovePeer(publicKeyBase64 string) error {
 
 // Up brings the device up.
 func (d *Device) Up() error {
-	d.dev.Up()
-	return nil
+	return d.dev.Up()
 }
 
 // Down brings the device down.
 func (d *Device) Down() error {
-	d.dev.Down()
-	return nil
+	return d.dev.Down()
 }
 
 // Close shuts down the device.
