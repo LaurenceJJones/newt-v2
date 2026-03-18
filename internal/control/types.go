@@ -184,6 +184,7 @@ type ClientWGGetConfigData struct {
 
 // Common message types sent from server to newt.
 const (
+	MsgPing            = "newt/ping"
 	MsgWgConnect       = "newt/wg/connect"
 	MsgWgReconnect     = "newt/wg/reconnect"
 	MsgWgTerminate     = "newt/wg/terminate"

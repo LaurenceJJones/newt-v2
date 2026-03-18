@@ -1,6 +1,8 @@
 package control
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -70,21 +72,27 @@ type Client struct {
 	// Connection callback
 	onConnect    func()
 	onDisconnect func(error)
+	callbackMu   sync.RWMutex
 
 	// Write serialization
 	writeMu sync.Mutex
 
 	// Config version tracking
 	configVersion atomic.Int64
+	processing    atomic.Bool
 }
 
 // OnConnect sets a callback that is called when the WebSocket connection is established.
 func (c *Client) OnConnect(fn func()) {
+	c.callbackMu.Lock()
+	defer c.callbackMu.Unlock()
 	c.onConnect = fn
 }
 
 // OnDisconnect sets a callback that is called when the WebSocket connection is lost.
 func (c *Client) OnDisconnect(fn func(error)) {
+	c.callbackMu.Lock()
+	defer c.callbackMu.Unlock()
 	c.onDisconnect = fn
 }
 
@@ -166,25 +174,15 @@ func (c *Client) Start(ctx context.Context) error {
 		}
 
 		// Connection established, run message loop
-		c.logger.Info("connected to control plane")
-		c.connected.Store(true)
-
-		// Call connection callback
-		if c.onConnect != nil {
-			c.onConnect()
-		}
+		c.markConnected()
 
 		err := c.runMessageLoop(ctx)
-		c.connected.Store(false)
+		c.markDisconnected(err)
 
 		if errors.Is(err, context.Canceled) {
 			return err
 		}
 
-		c.logger.Warn("disconnected", "error", err)
-		if c.onDisconnect != nil {
-			c.onDisconnect(err)
-		}
 		c.disconnect()
 
 		// Wait before reconnecting
@@ -193,6 +191,33 @@ func (c *Client) Start(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(c.cfg.ReconnectInterval):
 		}
+	}
+}
+
+func (c *Client) markConnected() {
+	c.connected.Store(true)
+	c.logger.Info("connected to control plane")
+
+	c.callbackMu.RLock()
+	onConnect := c.onConnect
+	c.callbackMu.RUnlock()
+	if onConnect != nil {
+		onConnect()
+	}
+}
+
+func (c *Client) markDisconnected(err error) {
+	c.connected.Store(false)
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+
+	c.logger.Warn("disconnected", "error", err)
+	c.callbackMu.RLock()
+	onDisconnect := c.onDisconnect
+	c.callbackMu.RUnlock()
+	if onDisconnect != nil {
+		onDisconnect(err)
 	}
 }
 
@@ -221,13 +246,13 @@ func (c *Client) connect(ctx context.Context) error {
 	if err != nil {
 		if resp != nil {
 			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return fmt.Errorf("dial: %w (status=%d body=%s)", err, resp.StatusCode, string(body))
 		}
 		return fmt.Errorf("dial: %w", err)
 	}
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	// Configure connection
@@ -247,7 +272,8 @@ func (c *Client) authenticate(ctx context.Context) (string, error) {
 
 	// Convert ws(s) to http(s) for auth endpoint
 	scheme := "https"
-	if u.Scheme == "ws" {
+	switch u.Scheme {
+	case "ws":
 		scheme = "http"
 	}
 
@@ -278,7 +304,7 @@ func (c *Client) authenticate(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -311,9 +337,10 @@ func (c *Client) buildWebSocketURL(token string) (string, error) {
 	}
 
 	// Ensure WebSocket scheme
-	if u.Scheme == "https" {
+	switch u.Scheme {
+	case "https":
 		u.Scheme = "wss"
-	} else if u.Scheme == "http" {
+	case "http":
 		u.Scheme = "ws"
 	}
 
@@ -347,16 +374,6 @@ func (c *Client) runMessageLoop(ctx context.Context) error {
 		<-pingDone
 	}()
 
-	// Setup pong handler
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(c.cfg.PongTimeout + c.cfg.PingInterval))
-	})
-
-	// Set initial read deadline
-	if err := conn.SetReadDeadline(time.Now().Add(c.cfg.PongTimeout + c.cfg.PingInterval)); err != nil {
-		return fmt.Errorf("set read deadline: %w", err)
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -364,15 +381,14 @@ func (c *Client) runMessageLoop(ctx context.Context) error {
 		default:
 		}
 
-		_, data, err := conn.ReadMessage()
+		msgType, data, err := conn.ReadMessage()
 		if err != nil {
 			return fmt.Errorf("read message: %w", err)
 		}
 
-		// Parse message
-		var msg Message
-		if err := json.Unmarshal(data, &msg); err != nil {
-			c.logger.Warn("invalid message", "error", err, "data", string(data))
+		msg, err := c.decodeMessage(msgType, data)
+		if err != nil {
+			c.logger.Warn("invalid message", "error", err)
 			continue
 		}
 
@@ -384,34 +400,82 @@ func (c *Client) runMessageLoop(ctx context.Context) error {
 		// Find and call handler
 		if handler, ok := c.handlers.Load(msg.Type); ok {
 			h := handler.(Handler)
+			c.processing.Store(true)
 			if err := h(msg); err != nil {
 				c.logger.Error("handler error",
 					"type", msg.Type,
 					"error", err,
 				)
 			}
+			c.processing.Store(false)
 		} else {
 			c.logger.Debug("unhandled message type", "type", msg.Type)
 		}
 	}
 }
 
-// pingLoop sends periodic ping messages to keep the connection alive.
+func (c *Client) decodeMessage(msgType int, data []byte) (Message, error) {
+	if msgType == websocket.BinaryMessage {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return Message{}, fmt.Errorf("create gzip reader: %w", err)
+		}
+		defer func() { _ = gr.Close() }()
+
+		uncompressed, err := io.ReadAll(gr)
+		if err != nil {
+			return Message{}, fmt.Errorf("decompress message: %w", err)
+		}
+		data = uncompressed
+	}
+
+	var msg Message
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return Message{}, fmt.Errorf("unmarshal message: %w", err)
+	}
+	return msg, nil
+}
+
+func (c *Client) sendPing(conn *websocket.Conn) error {
+	if c.processing.Load() {
+		c.logger.Debug("skipping ping while processing message")
+		return nil
+	}
+
+	msg := Message{
+		Type:          MsgPing,
+		Data:          json.RawMessage(`{}`),
+		ConfigVersion: c.configVersion.Load(),
+	}
+
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	if err := conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	if err := conn.WriteJSON(msg); err != nil {
+		return fmt.Errorf("write ping: %w", err)
+	}
+	return nil
+}
+
+// pingLoop sends periodic application ping messages to keep the connection alive.
 func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 	ticker := time.NewTicker(c.cfg.PingInterval)
 	defer ticker.Stop()
+
+	if err := c.sendPing(conn); err != nil {
+		c.logger.Debug("ping failed", "error", err)
+		return
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.writeMu.Lock()
-			deadline := time.Now().Add(c.cfg.WriteTimeout)
-			err := conn.WriteControl(websocket.PingMessage, nil, deadline)
-			c.writeMu.Unlock()
-
-			if err != nil {
+			if err := c.sendPing(conn); err != nil {
 				c.logger.Debug("ping failed", "error", err)
 				return
 			}
@@ -470,7 +534,7 @@ func (c *Client) disconnect() {
 			time.Now().Add(time.Second),
 		)
 		c.writeMu.Unlock()
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
