@@ -15,12 +15,12 @@ import (
 	"time"
 
 	"github.com/fosrl/newt/internal/authdaemon"
-	"github.com/fosrl/newt/internal/control"
 	"github.com/fosrl/newt/internal/clients"
+	"github.com/fosrl/newt/internal/control"
 	"github.com/fosrl/newt/internal/docker"
+	"github.com/fosrl/newt/internal/expose"
 	"github.com/fosrl/newt/internal/health"
 	"github.com/fosrl/newt/internal/lifecycle"
-	"github.com/fosrl/newt/internal/proxy"
 	"github.com/fosrl/newt/internal/telemetry"
 	"github.com/fosrl/newt/internal/tunnel"
 	"github.com/fosrl/newt/pkg/version"
@@ -37,7 +37,7 @@ type App struct {
 	telemetry *telemetry.Provider
 	control   *control.Client
 	tunnel    *tunnel.Manager
-	proxy     *proxy.Manager
+	proxy     *expose.Manager
 	health    *health.Monitor
 	docker    *docker.Discovery
 	clients   *clients.Manager
@@ -103,6 +103,160 @@ func (a *App) currentTunnelState() tunnel.TunnelState {
 	return a.tunnel.State()
 }
 
+func (a *App) configureTunnelNetstack(info tunnel.TunnelInfo, ns *tunnel.NetStack) {
+	a.proxy.SetListenIP(info.LocalAddr.String())
+	a.proxy.SetDialer(&netstackDialer{ns: ns})
+	if a.clients == nil {
+		return
+	}
+
+	a.clients.SetMainNetstack(ns)
+	if err := a.clients.StartHolepunch(info.PeerKey, info.PeerEndpoint, info.RelayPort); err != nil {
+		a.logger.Warn("failed to start clients hole punch", "error", err)
+	}
+	if err := a.clients.StartDirectRelay(info.LocalAddr.String()); err != nil {
+		a.logger.Warn("failed to start clients direct relay", "error", err)
+	}
+}
+
+func (a *App) applyInitialTunnelTargets(info tunnel.TunnelInfo) {
+	if len(info.InitialTCPTargets) > 0 {
+		a.proxy.AddTCPTargets(info.InitialTCPTargets)
+	}
+	if len(info.InitialUDPTargets) > 0 {
+		a.proxy.AddUDPTargets(info.InitialUDPTargets)
+	}
+	if len(info.InitialHealthChecks) == 0 {
+		return
+	}
+
+	healthChecks := buildInitialHealthChecks(info.InitialHealthChecks)
+	if err := a.health.AddTargets(healthChecks); err != nil {
+		a.logger.Warn("failed to add initial health checks", "error", err)
+	}
+}
+
+func (a *App) registerTunnelWithControl(sendControlData func(ctx context.Context, msgType string, data any) error, shouldRequestExitNodes bool) {
+	if shouldRequestExitNodes {
+		a.logger.Debug("requesting exit nodes", "public_key", a.tunnel.PublicKey())
+		if err := sendControlData(context.Background(), control.MsgPingRequest, control.PingRequestData{
+			NoCloud: a.cfg.NoCloud,
+		}); err != nil {
+			a.logger.Error("failed to send ping request", "error", err)
+		}
+	}
+
+	if err := sendControlData(context.Background(), control.MsgWgRegister, control.WgRegisterData{
+		PublicKey:           a.tunnel.PublicKey(),
+		NewtVersion:         version.Short(),
+		BackwardsCompatible: true,
+	}); err != nil {
+		a.logger.Error("failed to send initial registration", "error", err)
+	}
+}
+
+func (a *App) refreshControlManagedState() {
+	if a.clients != nil {
+		a.setClientsToken(a.control.Token())
+		if err := a.requestClientsConfig(context.Background()); err != nil {
+			a.logger.Warn("failed to request client WG config", "error", err)
+		}
+	}
+
+	if err := a.blueprintSender()(); err != nil {
+		a.logger.Error("failed to send blueprint", "error", err)
+	}
+}
+
+func (a *App) handleExitNodes(msg control.Message) error {
+	var data control.ExitNodesData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		return fmt.Errorf("unmarshal exit nodes: %w", err)
+	}
+
+	a.logger.Debug("received exit nodes", "count", len(data.ExitNodes))
+	if len(data.ExitNodes) == 0 {
+		a.logger.Warn("no exit nodes provided")
+		return nil
+	}
+
+	pingResults := a.pingExitNodes(data.ExitNodes)
+	a.logger.Debug("registering with ping results", "public_key", a.tunnel.PublicKey())
+	payload := map[string]any{
+		"publicKey":   a.tunnel.PublicKey(),
+		"pingResults": pingResults,
+		"newtVersion": version.Short(),
+	}
+	a.startRegisterRetry(payload)
+	return nil
+}
+
+func (a *App) handleSync(msg control.Message) error {
+	var data control.SyncData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		return fmt.Errorf("unmarshal sync data: %w", err)
+	}
+
+	if err := a.proxy.SyncTargets(data.Targets); err != nil {
+		return fmt.Errorf("sync proxy targets: %w", err)
+	}
+	if err := a.health.SyncTargets(data.HealthCheckTargets); err != nil {
+		return fmt.Errorf("sync health checks: %w", err)
+	}
+
+	a.logger.Debug("sync applied",
+		"tcp_targets", len(data.Targets.TCP),
+		"udp_targets", len(data.Targets.UDP),
+		"health_checks", len(data.HealthCheckTargets),
+	)
+	return nil
+}
+
+func (a *App) handleBlueprintResults(msg control.Message) error {
+	var result control.BlueprintResultData
+	if err := json.Unmarshal(msg.Data, &result); err != nil {
+		return fmt.Errorf("unmarshal blueprint result: %w", err)
+	}
+
+	if result.Success {
+		a.logger.Info("blueprint applied successfully")
+		return nil
+	}
+
+	a.logger.Warn("blueprint application failed", "message", result.Message)
+	return nil
+}
+
+func (a *App) sendRegisterPayload(sendControlData func(ctx context.Context, msgType string, data any) error, payload any) error {
+	return sendControlData(context.Background(), control.MsgWgRegister, payload)
+}
+
+func (a *App) replaceRegisterRetry(cancel context.CancelFunc) {
+	a.registerMu.Lock()
+	defer a.registerMu.Unlock()
+
+	if a.registerRetryCancel != nil {
+		a.registerRetryCancel()
+	}
+	a.registerRetryCancel = cancel
+}
+
+func (a *App) runRegisterRetry(ctx context.Context, sendControlData func(ctx context.Context, msgType string, data any) error, payload any) {
+	ticker := time.NewTicker(a.registerRetryEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := a.sendRegisterPayload(sendControlData, payload); err != nil {
+				a.logger.Warn("failed to retry registration with ping results", "error", err)
+			}
+		}
+	}
+}
+
 func buildInitialHealthChecks(checks []tunnel.HealthCheckInfo) []control.HealthCheckData {
 	if len(checks) == 0 {
 		return nil
@@ -129,61 +283,39 @@ func buildInitialHealthChecks(checks []tunnel.HealthCheckInfo) []control.HealthC
 	return healthChecks
 }
 
-// New creates a new App instance with the given configuration.
-func New(cfg *Config, logger *slog.Logger) (*App, error) {
-	if cfg == nil {
-		return nil, errors.New("config is required")
-	}
-	if logger == nil {
-		logger = slog.Default()
+func (a *App) initTelemetry() error {
+	if !a.cfg.MetricsEnabled && !a.cfg.OTLPEnabled {
+		return nil
 	}
 
-	app := &App{
-		cfg:        cfg,
-		logger:     logger,
-		supervisor: lifecycle.NewSupervisor(logger),
-		registerRetryEvery: 2 * time.Second,
+	provider, err := telemetry.NewProvider(telemetry.Config{
+		ServiceName:    "newt",
+		ServiceVersion: version.Short(),
+		Region:         a.cfg.Region,
+		PrometheusAddr: a.cfg.AdminAddr,
+		OTLPEnabled:    a.cfg.OTLPEnabled,
+	}, a.logger)
+	if err != nil {
+		return fmt.Errorf("create telemetry: %w", err)
 	}
-
-	if err := app.initComponents(); err != nil {
-		return nil, fmt.Errorf("init components: %w", err)
-	}
-
-	return app, nil
+	a.telemetry = provider
+	a.supervisor.Add(a.telemetry)
+	return nil
 }
 
-// initComponents initializes all application components.
-func (a *App) initComponents() error {
-	var err error
-
-	// Initialize telemetry provider
-	if a.cfg.MetricsEnabled || a.cfg.OTLPEnabled {
-		a.telemetry, err = telemetry.NewProvider(telemetry.Config{
-			ServiceName:    "newt",
-			ServiceVersion: version.Short(),
-			Region:         a.cfg.Region,
-			PrometheusAddr: a.cfg.AdminAddr,
-			OTLPEnabled:    a.cfg.OTLPEnabled,
-		}, a.logger)
-		if err != nil {
-			return fmt.Errorf("create telemetry: %w", err)
-		}
-		a.supervisor.Add(a.telemetry)
+func (a *App) buildTLSConfig() (*tls.Config, error) {
+	if a.cfg.TLSClientCert == "" {
+		return nil, nil
 	}
 
-	// Build TLS config if needed
-	var tlsConfig *tls.Config
-	if a.cfg.TLSClientCert != "" {
-		cert, err := tls.LoadX509KeyPair(a.cfg.TLSClientCert, a.cfg.TLSClientKey)
-		if err != nil {
-			return fmt.Errorf("load client cert: %w", err)
-		}
-		tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		}
+	cert, err := tls.LoadX509KeyPair(a.cfg.TLSClientCert, a.cfg.TLSClientKey)
+	if err != nil {
+		return nil, fmt.Errorf("load client cert: %w", err)
 	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
+}
 
-	// Initialize control plane client
+func (a *App) initControlAndTunnel(tlsConfig *tls.Config) error {
 	controlCfg := control.DefaultClientConfig()
 	controlCfg.Endpoint = a.cfg.Endpoint
 	controlCfg.ID = a.cfg.ID
@@ -192,7 +324,6 @@ func (a *App) initComponents() error {
 
 	a.control = control.NewClient(controlCfg, a.logger)
 
-	// Initialize tunnel manager (before adding control to supervisor so we can get the public key)
 	tunnelCfg := tunnel.Config{
 		InterfaceName: a.cfg.InterfaceName,
 		MTU:           a.cfg.MTU,
@@ -205,101 +336,43 @@ func (a *App) initComponents() error {
 	}
 	a.tunnel = tunnel.NewManager(tunnelCfg, a.control, a.logger)
 
-	if !a.cfg.DisableClients {
-		a.clients, err = clients.NewManager(a.cfg.Port, a.cfg.MTU, a.cfg.DNS, a.control, a.logger)
-		if err != nil {
-			return fmt.Errorf("create clients manager: %w", err)
-		}
+	if a.cfg.DisableClients {
+		return nil
 	}
 
-	// Wire up tunnel callbacks
+	clientsManager, err := clients.NewManager(a.cfg.Port, a.cfg.MTU, a.cfg.DNS, a.control, a.logger)
+	if err != nil {
+		return fmt.Errorf("create clients manager: %w", err)
+	}
+	a.clients = clientsManager
+	return nil
+}
+
+func (a *App) wireControlAndTunnel() {
 	a.tunnel.OnConnect(a.handleTunnelConnect)
 	a.tunnel.OnDisconnect(a.handleTunnelDisconnect)
 
-	// Set up control connection callback to request exit nodes
 	a.control.OnConnect(a.handleControlConnect)
 	a.control.OnDisconnect(a.handleControlDisconnect)
 
-	// Handle exit nodes response - ping them and register with results
-	a.control.Register(control.MsgPingExitNodes, func(msg control.Message) error {
-		var data control.ExitNodesData
-		if err := json.Unmarshal(msg.Data, &data); err != nil {
-			return fmt.Errorf("unmarshal exit nodes: %w", err)
-		}
+	a.control.Register(control.MsgPingExitNodes, a.handleExitNodes)
+	a.control.Register(control.MsgSync, a.handleSync)
+	a.control.Register(control.MsgBlueprintResults, a.handleBlueprintResults)
 
-		a.logger.Debug("received exit nodes", "count", len(data.ExitNodes))
-
-		if len(data.ExitNodes) == 0 {
-			a.logger.Warn("no exit nodes provided")
-			return nil
-		}
-
-		// Ping exit nodes and collect results
-		pingResults := a.pingExitNodes(data.ExitNodes)
-
-		// Send registration with ping results
-		a.logger.Debug("registering with ping results", "public_key", a.tunnel.PublicKey())
-		payload := map[string]any{
-			"publicKey":   a.tunnel.PublicKey(),
-			"pingResults": pingResults,
-			"newtVersion": version.Short(),
-		}
-		a.startRegisterRetry(payload)
-		return nil
-	})
-
-	a.control.Register(control.MsgSync, func(msg control.Message) error {
-		var data control.SyncData
-		if err := json.Unmarshal(msg.Data, &data); err != nil {
-			return fmt.Errorf("unmarshal sync data: %w", err)
-		}
-
-		if err := a.proxy.SyncTargets(data.Targets); err != nil {
-			return fmt.Errorf("sync proxy targets: %w", err)
-		}
-		if err := a.health.SyncTargets(data.HealthCheckTargets); err != nil {
-			return fmt.Errorf("sync health checks: %w", err)
-		}
-
-		a.logger.Debug("sync applied",
-			"tcp_targets", len(data.Targets.TCP),
-			"udp_targets", len(data.Targets.UDP),
-			"health_checks", len(data.HealthCheckTargets),
-		)
-
-		return nil
-	})
-
-	a.control.Register(control.MsgBlueprintResults, func(msg control.Message) error {
-		var result control.BlueprintResultData
-		if err := json.Unmarshal(msg.Data, &result); err != nil {
-			return fmt.Errorf("unmarshal blueprint result: %w", err)
-		}
-
-		if result.Success {
-			a.logger.Info("blueprint applied successfully")
-			return nil
-		}
-
-		a.logger.Warn("blueprint application failed", "message", result.Message)
-		return nil
-	})
-
-	// Add components to supervisor
 	a.supervisor.Add(a.control)
 	a.supervisor.Add(a.tunnel)
+}
 
-	// Initialize proxy manager
-	a.proxy = proxy.NewManager(a.control, a.logger)
+func (a *App) initManagedServices() error {
+	a.proxy = expose.NewManager(a.control, a.logger)
 	a.supervisor.Add(a.proxy)
 
-	// Initialize health monitor
 	a.health = health.NewMonitor(a.control, a.cfg.EnforceHealthCert, a.logger)
 	a.supervisor.Add(a.health)
 
-	// Initialize docker discovery (always register to handle socket check/fetch messages)
 	a.docker = docker.NewDiscovery(a.cfg.DockerSocket, "", a.cfg.DockerEnforceNetworkValidation, a.control, a.logger)
 	a.supervisor.Add(a.docker)
+
 	if a.cfg.AuthDaemonEnabled {
 		authCfg := authdaemon.Config{
 			DisableHTTPS:           a.cfg.AuthDaemonAddr == "",
@@ -311,14 +384,61 @@ func (a *App) initComponents() error {
 			Force:                  true,
 			GenerateRandomPassword: a.cfg.AuthDaemonRandomPass,
 		}
-		a.auth, err = authdaemon.NewServer(authCfg, a.control, a.logger)
+		server, err := authdaemon.NewServer(authCfg, a.control, a.logger)
 		if err != nil {
 			return fmt.Errorf("create auth daemon: %w", err)
 		}
+		a.auth = server
 		a.supervisor.Add(a.auth)
 	}
+
 	if a.clients != nil {
 		a.supervisor.Add(a.clients)
+	}
+	return nil
+}
+
+// New creates a new App instance with the given configuration.
+func New(cfg *Config, logger *slog.Logger) (*App, error) {
+	if cfg == nil {
+		return nil, errors.New("config is required")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	app := &App{
+		cfg:                cfg,
+		logger:             logger,
+		supervisor:         lifecycle.NewSupervisor(logger),
+		registerRetryEvery: 2 * time.Second,
+	}
+
+	if err := app.initComponents(); err != nil {
+		return nil, fmt.Errorf("init components: %w", err)
+	}
+
+	return app, nil
+}
+
+// initComponents initializes all application components.
+func (a *App) initComponents() error {
+	if err := a.initTelemetry(); err != nil {
+		return err
+	}
+
+	tlsConfig, err := a.buildTLSConfig()
+	if err != nil {
+		return err
+	}
+	if err := a.initControlAndTunnel(tlsConfig); err != nil {
+		return err
+	}
+
+	a.wireControlAndTunnel()
+
+	if err := a.initManagedServices(); err != nil {
+		return err
 	}
 
 	a.logger.Info("components initialized",
@@ -361,32 +481,9 @@ func (a *App) handleTunnelConnectWithNetstack(info tunnel.TunnelInfo, ns *tunnel
 	)
 
 	if ns != nil {
-		a.proxy.SetListenIP(info.LocalAddr.String())
-		a.proxy.SetDialer(&netstackDialer{ns: ns})
-		if a.clients != nil {
-			a.clients.SetMainNetstack(ns)
-			if err := a.clients.StartHolepunch(info.PeerKey, info.PeerEndpoint, info.RelayPort); err != nil {
-				a.logger.Warn("failed to start clients hole punch", "error", err)
-			}
-			if err := a.clients.StartDirectRelay(info.LocalAddr.String()); err != nil {
-				a.logger.Warn("failed to start clients direct relay", "error", err)
-			}
-		}
+		a.configureTunnelNetstack(info, ns)
 	}
-
-	if len(info.InitialTCPTargets) > 0 {
-		a.proxy.AddTCPTargets(info.InitialTCPTargets)
-	}
-	if len(info.InitialUDPTargets) > 0 {
-		a.proxy.AddUDPTargets(info.InitialUDPTargets)
-	}
-
-	if len(info.InitialHealthChecks) > 0 {
-		healthChecks := buildInitialHealthChecks(info.InitialHealthChecks)
-		if err := a.health.AddTargets(healthChecks); err != nil {
-			a.logger.Warn("failed to add initial health checks", "error", err)
-		}
-	}
+	a.applyInitialTunnelTargets(info)
 }
 
 func (a *App) handleTunnelDisconnect() {
@@ -408,30 +505,8 @@ func (a *App) handleControlConnect() {
 	}
 
 	shouldRequestExitNodes := a.currentTunnelState() != tunnel.StateConnected
-	if shouldRequestExitNodes {
-		a.logger.Debug("requesting exit nodes", "public_key", a.tunnel.PublicKey())
-		if err := sendControlData(context.Background(), control.MsgPingRequest, control.PingRequestData{
-			NoCloud: a.cfg.NoCloud,
-		}); err != nil {
-			a.logger.Error("failed to send ping request", "error", err)
-		}
-	}
-	if err := sendControlData(context.Background(), control.MsgWgRegister, control.WgRegisterData{
-		PublicKey:           a.tunnel.PublicKey(),
-		NewtVersion:         version.Short(),
-		BackwardsCompatible: true,
-	}); err != nil {
-		a.logger.Error("failed to send initial registration", "error", err)
-	}
-	if a.clients != nil {
-		a.setClientsToken(a.control.Token())
-		if err := a.requestClientsConfig(context.Background()); err != nil {
-			a.logger.Warn("failed to request client WG config", "error", err)
-		}
-	}
-	if err := a.blueprintSender()(); err != nil {
-		a.logger.Error("failed to send blueprint", "error", err)
-	}
+	a.registerTunnelWithControl(sendControlData, shouldRequestExitNodes)
+	a.refreshControlManagedState()
 }
 
 func (a *App) handleControlDisconnect(err error) {
@@ -448,32 +523,14 @@ func (a *App) startRegisterRetry(payload any) {
 
 	a.stopRegisterRetry()
 
-	if err := sendControlData(context.Background(), control.MsgWgRegister, payload); err != nil {
+	if err := a.sendRegisterPayload(sendControlData, payload); err != nil {
 		a.logger.Error("failed to send registration with ping results", "error", err)
 		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-
-	a.registerMu.Lock()
-	a.registerRetryCancel = cancel
-	a.registerMu.Unlock()
-
-	go func() {
-		ticker := time.NewTicker(a.registerRetryEvery)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := sendControlData(context.Background(), control.MsgWgRegister, payload); err != nil {
-					a.logger.Warn("failed to retry registration with ping results", "error", err)
-				}
-			}
-		}
-	}()
+	a.replaceRegisterRetry(cancel)
+	go a.runRegisterRetry(ctx, sendControlData, payload)
 }
 
 func (a *App) stopRegisterRetry() {
@@ -525,7 +582,7 @@ func (a *App) pingExitNodes(nodes []control.ExitNode) []control.ExitNodePingResu
 				result.Error = err.Error()
 				continue
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 
 			totalLatency += latency
 			successes++

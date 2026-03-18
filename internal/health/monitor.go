@@ -85,12 +85,7 @@ func (m *Monitor) Start(ctx context.Context) error {
 	m.group = lifecycle.NewGroup(ctx)
 	m.startPendingCheckers()
 
-	// Register message handlers
-	m.controlClient.Register(control.MsgHealthCheckAdd, m.handleAdd)
-	m.controlClient.Register(control.MsgHealthCheckRemove, m.handleRemove)
-	m.controlClient.Register(control.MsgHealthCheckEnable, m.handleEnable)
-	m.controlClient.Register(control.MsgHealthCheckDisable, m.handleDisable)
-	m.controlClient.Register(control.MsgHealthCheckStatusReq, m.handleStatusRequest)
+	m.registerHandlers()
 
 	m.logger.Info("health monitor started")
 
@@ -101,6 +96,18 @@ func (m *Monitor) Start(ctx context.Context) error {
 	m.stopAll()
 
 	return ctx.Err()
+}
+
+func (m *Monitor) registerHandlers() {
+	if m.controlClient == nil {
+		return
+	}
+
+	m.controlClient.Register(control.MsgHealthCheckAdd, m.handleAdd)
+	m.controlClient.Register(control.MsgHealthCheckRemove, m.handleRemove)
+	m.controlClient.Register(control.MsgHealthCheckEnable, m.handleEnable)
+	m.controlClient.Register(control.MsgHealthCheckDisable, m.handleDisable)
+	m.controlClient.Register(control.MsgHealthCheckStatusReq, m.handleStatusRequest)
 }
 
 // startPendingCheckers starts any enabled health checks that were added before Start ran.
@@ -142,7 +149,7 @@ func (m *Monitor) handleAdd(msg control.Message) error {
 		return fmt.Errorf("unmarshal health check add data: %w", err)
 	}
 
-	return m.AddTargets(data.Targets)
+	return m.addParsedTargets(data.Targets)
 }
 
 // handleRemove handles the health check remove message.
@@ -182,7 +189,7 @@ func (m *Monitor) handleDisable(msg control.Message) error {
 }
 
 // handleStatusRequest handles the health check status request message.
-func (m *Monitor) handleStatusRequest(msg control.Message) error {
+func (m *Monitor) handleStatusRequest(_ control.Message) error {
 	return m.sendStatus()
 }
 
@@ -283,6 +290,16 @@ func (m *Monitor) addTarget(target Target) error {
 		m.mu.Unlock()
 	}
 
+	return nil
+}
+
+func (m *Monitor) addParsedTargets(targets []control.HealthCheckData) error {
+	for _, data := range targets {
+		target := m.parseTarget(data)
+		if err := m.addTarget(target); err != nil {
+			return fmt.Errorf("add target %d: %w", data.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -408,13 +425,7 @@ func stopActiveChecker(ac *activeChecker) {
 
 // AddTargets adds multiple health check targets from initial configuration.
 func (m *Monitor) AddTargets(targets []control.HealthCheckData) error {
-	for _, data := range targets {
-		target := m.parseTarget(data)
-		if err := m.addTarget(target); err != nil {
-			return fmt.Errorf("add target %d: %w", data.ID, err)
-		}
-	}
-	return nil
+	return m.addParsedTargets(targets)
 }
 
 func (m *Monitor) removeTargets(ids []int) error {
@@ -433,11 +444,8 @@ func (m *Monitor) SyncTargets(targets []control.HealthCheckData) error {
 		desired[target.ID] = target
 	}
 
-	for _, target := range targets {
-		parsed := m.parseTarget(target)
-		if err := m.addTarget(parsed); err != nil {
-			return fmt.Errorf("sync target %d: %w", target.ID, err)
-		}
+	if err := m.addParsedTargets(targets); err != nil {
+		return err
 	}
 
 	m.mu.RLock()

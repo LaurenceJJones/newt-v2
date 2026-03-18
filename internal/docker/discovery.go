@@ -3,7 +3,6 @@ package docker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,10 +20,10 @@ import (
 
 // Discovery provides Docker container discovery and monitoring.
 type Discovery struct {
-	logger        *slog.Logger
-	controlClient *control.Client
-	socketPath    string
-	networkName   string // Optional: only list containers on this network
+	logger                   *slog.Logger
+	controlClient            *control.Client
+	socketPath               string
+	networkName              string // Optional: only list containers on this network
 	enforceNetworkValidation bool
 
 	// Docker client
@@ -60,10 +59,10 @@ func NewDiscovery(socketPath string, networkName string, enforceNetworkValidatio
 	}
 
 	return &Discovery{
-		logger:        logger,
-		controlClient: controlClient,
-		socketPath:    socketPath,
-		networkName:   networkName,
+		logger:                   logger,
+		controlClient:            controlClient,
+		socketPath:               socketPath,
+		networkName:              networkName,
 		enforceNetworkValidation: enforceNetworkValidation,
 	}
 }
@@ -77,9 +76,7 @@ func (d *Discovery) Name() string {
 func (d *Discovery) Start(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
-	// Register message handlers
-	d.controlClient.Register(control.MsgSocketCheck, d.handleCheck)
-	d.controlClient.Register(control.MsgSocketFetch, d.handleFetch)
+	d.registerHandlers()
 
 	// Try to connect to Docker
 	if err := d.connect(); err != nil {
@@ -97,6 +94,15 @@ func (d *Discovery) Start(ctx context.Context) error {
 
 	d.disconnect()
 	return d.ctx.Err()
+}
+
+func (d *Discovery) registerHandlers() {
+	if d.controlClient == nil {
+		return
+	}
+
+	d.controlClient.Register(control.MsgSocketCheck, d.handleCheck)
+	d.controlClient.Register(control.MsgSocketFetch, d.handleFetch)
 }
 
 // connect establishes connection to Docker.
@@ -120,7 +126,7 @@ func (d *Discovery) connect() error {
 	// Test connection
 	_, err = cli.Ping(d.ctx)
 	if err != nil {
-		cli.Close()
+		_ = cli.Close()
 		return fmt.Errorf("ping docker: %w", err)
 	}
 
@@ -134,13 +140,13 @@ func (d *Discovery) disconnect() {
 	defer d.mu.Unlock()
 
 	if d.docker != nil {
-		d.docker.Close()
+		_ = d.docker.Close()
 		d.docker = nil
 	}
 }
 
 // handleCheck handles the socket check message.
-func (d *Discovery) handleCheck(msg control.Message) error {
+func (d *Discovery) handleCheck(_ control.Message) error {
 	available := d.isAvailable()
 
 	return d.controlClient.SendData(d.ctx, control.MsgSocketStatus, control.SocketStatusData{
@@ -150,7 +156,7 @@ func (d *Discovery) handleCheck(msg control.Message) error {
 }
 
 // handleFetch handles the socket fetch message.
-func (d *Discovery) handleFetch(msg control.Message) error {
+func (d *Discovery) handleFetch(_ control.Message) error {
 	d.logger.Debug("handling socket fetch request")
 
 	if d.socketPath == "" {
@@ -435,9 +441,4 @@ func (d *Discovery) GetContainer(id string) (ContainerInfo, bool) {
 		return ContainerInfo{}, false
 	}
 	return val.(ContainerInfo), true
-}
-
-// parseDockerMessage is a helper to parse JSON from docker messages.
-func parseDockerMessage(data json.RawMessage, v any) error {
-	return json.Unmarshal(data, v)
 }
