@@ -162,11 +162,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.logger.Info("clients manager started", "port", m.port)
 	<-ctx.Done()
-	m.stopConfigRequests()
-	m.Reset()
-	if m.sharedBind != nil {
-		_ = m.sharedBind.Close()
-	}
+	m.shutdown()
 	return ctx.Err()
 }
 
@@ -208,6 +204,26 @@ func (m *Manager) Reset() {
 	m.stopDirectRelayLocked()
 	m.mainNetstack = nil
 	m.closeClientInterfaceLocked()
+}
+
+func (m *Manager) shutdown() {
+	m.stopConfigRequests()
+	if m.holePunch != nil {
+		_ = m.holePunch.SyncExitNodes(nil)
+	}
+	if m.hpTester != nil {
+		m.hpTester.Stop()
+	}
+
+	m.mu.Lock()
+	m.stopDirectRelayLocked()
+	m.mainNetstack = nil
+	m.closeClientInterfaceLocked()
+	m.mu.Unlock()
+
+	if m.sharedBind != nil {
+		_ = m.sharedBind.Close()
+	}
 }
 
 func (m *Manager) handleReceiveConfig(msg control.Message) error {

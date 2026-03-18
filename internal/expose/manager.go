@@ -389,10 +389,16 @@ func (m *Manager) stopAll() {
 	}
 	m.mu.Unlock()
 
+	var wg sync.WaitGroup
 	for _, proxy := range proxies {
-		telemetry.AddActiveProxyTargets(proxy.target.Protocol, -1)
-		m.stopProxy(proxy)
+		wg.Add(1)
+		go func(proxy *activeProxy) {
+			defer wg.Done()
+			telemetry.AddActiveProxyTargets(proxy.target.Protocol, -1)
+			m.stopProxy(proxy)
+		}(proxy)
 	}
+	wg.Wait()
 }
 
 // Shutdown gracefully shuts down the proxy manager.
