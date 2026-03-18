@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -56,27 +57,7 @@ func run() error {
 		return fmt.Errorf("create app: %w", err)
 	}
 
-	// Setup context with signal handling
-	ctx, stop := signal.NotifyContext(context.Background(),
-		os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// Run application (blocks until signal)
-	if err := application.Run(ctx); err != nil && err != context.Canceled {
-		logger.Error("application error", "error", err)
-	}
-
-	// Graceful shutdown with timeout
-	logger.Info("initiating graceful shutdown")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := application.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("shutdown error", "error", err)
-	}
-
-	logger.Info("shutdown complete")
-	return nil
+	return runApplication(context.Background(), application, logger, true)
 }
 
 //nolint:unused // used by Windows service entrypoints
@@ -99,16 +80,59 @@ func runWithArgs(ctx context.Context, args []string) error {
 		return fmt.Errorf("create app: %w", err)
 	}
 
-	if err := application.Run(ctx); err != nil && err != context.Canceled {
-		logger.Error("application error", "error", err)
+	return runApplication(ctx, application, logger, false)
+}
+
+func runApplication(parent context.Context, application *app.App, logger interface {
+	Info(string, ...any)
+	Warn(string, ...any)
+	Error(string, ...any)
+}, handleSignals bool) error {
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- application.Run(runCtx)
+	}()
+
+	if handleSignals {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
+
+		select {
+		case err := <-runErrCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("application error", "error", err)
+			}
+			return nil
+		case sig := <-sigCh:
+			logger.Info("initiating graceful shutdown", "signal", sig.String())
+		}
+	} else {
+		select {
+		case err := <-runErrCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("application error", "error", err)
+			}
+			return nil
+		case <-parent.Done():
+			logger.Info("initiating graceful shutdown")
+		}
 	}
 
-	logger.Info("initiating graceful shutdown")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelShutdown()
 
 	if err := application.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("shutdown error", "error", err)
+	}
+
+	cancelRun()
+
+	if err := <-runErrCh; err != nil && !errors.Is(err, context.Canceled) {
+		logger.Error("application error", "error", err)
 	}
 
 	logger.Info("shutdown complete")

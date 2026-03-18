@@ -19,6 +19,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type readLoopConn interface {
+	Close() error
+}
+
 // ClientConfig holds configuration for the control plane client.
 type ClientConfig struct {
 	// Endpoint is the Pangolin server WebSocket URL
@@ -363,6 +367,9 @@ func (c *Client) runMessageLoop(ctx context.Context) error {
 		return errors.New("not connected")
 	}
 
+	stopInterrupt := interruptReadOnCancel(ctx, conn)
+	defer stopInterrupt()
+
 	// Start ping routine
 	pingDone := make(chan struct{})
 	go func() {
@@ -396,6 +403,9 @@ func (c *Client) runMessageLoop(ctx context.Context) error {
 		if msg.ConfigVersion > 0 {
 			c.configVersion.Store(msg.ConfigVersion)
 		}
+		if msg.Type == MsgPong {
+			continue
+		}
 
 		// Find and call handler
 		if handler, ok := c.handlers.Load(msg.Type); ok {
@@ -411,6 +421,20 @@ func (c *Client) runMessageLoop(ctx context.Context) error {
 		} else {
 			c.logger.Debug("unhandled message type", "type", msg.Type)
 		}
+	}
+}
+
+func interruptReadOnCancel(ctx context.Context, conn readLoopConn) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
 	}
 }
 

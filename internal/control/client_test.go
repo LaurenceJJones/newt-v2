@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
@@ -69,4 +70,31 @@ func TestMarkDisconnectedIgnoresCanceledCallback(t *testing.T) {
 	if c.Connected() {
 		t.Fatal("expected client to be marked disconnected")
 	}
+}
+
+type stubReadLoopConn struct {
+	closed atomic.Int32
+}
+
+func (s *stubReadLoopConn) Close() error {
+	s.closed.Add(1)
+	return nil
+}
+
+func TestInterruptReadOnCancelClosesConn(t *testing.T) {
+	conn := &stubReadLoopConn{}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := interruptReadOnCancel(ctx, conn)
+	cancel()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if conn.closed.Load() == 1 {
+			stop()
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stop()
+	t.Fatalf("expected conn to be closed once, got %d", conn.closed.Load())
 }

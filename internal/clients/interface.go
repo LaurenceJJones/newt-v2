@@ -152,8 +152,10 @@ func (m *Manager) closeClientInterfaceLocked() {
 	if m.device != nil {
 		m.device.Close()
 		m.device = nil
-	}
-	if m.clientTun != nil {
+		// The WireGuard device owns the active TUN and closes it as part of
+		// device teardown. Avoid double-closing the same object here.
+		m.clientTun = nil
+	} else if m.clientTun != nil {
 		_ = m.clientTun.Close()
 		m.clientTun = nil
 	}

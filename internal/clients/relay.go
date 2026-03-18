@@ -88,8 +88,14 @@ func (m *Manager) runDirectRelay(listener net.PacketConn) {
 }
 
 func (m *Manager) stopDirectRelayLocked() {
+	listener := m.relayListener
 	if m.relayStop != nil {
 		close(m.relayStop)
+	}
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if m.relayStop != nil {
 		m.relayWG.Wait()
 		m.relayStop = nil
 	}
@@ -97,7 +103,6 @@ func (m *Manager) stopDirectRelayLocked() {
 		m.sharedBind.ClearNetstackConn()
 	}
 	if m.relayListener != nil {
-		_ = m.relayListener.Close()
 		m.relayListener = nil
 	}
 }

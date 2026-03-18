@@ -462,9 +462,13 @@ func (m *Manager) closeTunnel(nextState TunnelState) {
 
 	// Close WireGuard device
 	t.device.Close()
+	if t.netstack != nil {
+		_ = t.netstack.Close()
+	}
 
-	// Notify callback
-	if m.onDisconnect != nil {
+	// Runtime disconnect handling is not needed during process shutdown, and
+	// calling back into other stopping components can delay teardown.
+	if m.onDisconnect != nil && (m.ctx == nil || m.ctx.Err() == nil) {
 		m.onDisconnect()
 	}
 
