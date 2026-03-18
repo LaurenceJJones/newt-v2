@@ -12,9 +12,9 @@ import (
 
 	"github.com/fosrl/newt/internal/clients"
 	"github.com/fosrl/newt/internal/control"
+	"github.com/fosrl/newt/internal/expose"
 	"github.com/fosrl/newt/internal/health"
 	"github.com/fosrl/newt/internal/lifecycle"
-	"github.com/fosrl/newt/internal/expose"
 	"github.com/fosrl/newt/internal/tunnel"
 	pkglogger "github.com/fosrl/newt/pkg/logger"
 )
@@ -24,7 +24,7 @@ func testLogger() *slog.Logger { return pkglogger.Discard() }
 func TestTunnelLifecycleSeedsAndClearsManagers(t *testing.T) {
 	a := &App{
 		logger: testLogger(),
-		proxy:  expose.NewManager(nil, testLogger()),
+		proxy:  expose.NewManager(nil, "", testLogger()),
 		health: health.NewMonitor(nil, false, testLogger()),
 	}
 
@@ -92,9 +92,9 @@ func TestHandleControlConnectRequestsPingClientsAndBlueprint(t *testing.T) {
 	)
 
 	a := &App{
-		cfg:    &Config{NoCloud: true},
-		logger: testLogger(),
-		tunnel: tunnel.NewManager(tunnel.Config{}, nil, testLogger()),
+		cfg:     &Config{NoCloud: true},
+		logger:  testLogger(),
+		tunnel:  tunnel.NewManager(tunnel.Config{}, nil, testLogger()),
 		clients: &clients.Manager{},
 		sendControlData: func(ctx context.Context, msgType string, data any) error {
 			messageTypes = append(messageTypes, msgType)
@@ -172,9 +172,9 @@ func TestHandleControlReconnectSkipsExitNodeRequestWhenTunnelConnected(t *testin
 	)
 
 	a := &App{
-		cfg:    &Config{NoCloud: true},
-		logger: testLogger(),
-		tunnel: tunnel.NewManager(tunnel.Config{}, nil, testLogger()),
+		cfg:     &Config{NoCloud: true},
+		logger:  testLogger(),
+		tunnel:  tunnel.NewManager(tunnel.Config{}, nil, testLogger()),
 		clients: &clients.Manager{},
 		tunnelStateFn: func() tunnel.TunnelState {
 			return tunnel.StateConnected
@@ -230,7 +230,7 @@ func TestRegisterRetryStartsAndStopsOnTunnelConnect(t *testing.T) {
 			}
 			return nil
 		},
-		proxy:  expose.NewManager(nil, testLogger()),
+		proxy:  expose.NewManager(nil, "", testLogger()),
 		health: health.NewMonitor(nil, false, testLogger()),
 	}
 
@@ -278,7 +278,7 @@ func TestHandleControlDisconnectStopsRetryWithoutTearingDownDataPlane(t *testing
 			}
 			return nil
 		},
-		proxy:  expose.NewManager(nil, testLogger()),
+		proxy:  expose.NewManager(nil, "", testLogger()),
 		health: health.NewMonitor(nil, false, testLogger()),
 	}
 
@@ -286,13 +286,13 @@ func TestHandleControlDisconnectStopsRetryWithoutTearingDownDataPlane(t *testing
 		LocalAddr:         netip.MustParseAddr("100.64.0.10"),
 		InitialTCPTargets: []string{"8080:127.0.0.1:8080"},
 		InitialHealthChecks: []tunnel.HealthCheckInfo{{
-			TargetID:  1,
-			Hostname:  "127.0.0.1",
-			Port:      8080,
-			Scheme:    "http",
-			Mode:      "http",
-			Method:    "GET",
-			Enabled:   true,
+			TargetID: 1,
+			Hostname: "127.0.0.1",
+			Port:     8080,
+			Scheme:   "http",
+			Mode:     "http",
+			Method:   "GET",
+			Enabled:  true,
 		}},
 	}, &tunnel.NetStack{})
 

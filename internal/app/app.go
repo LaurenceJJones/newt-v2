@@ -365,7 +365,7 @@ func (a *App) wireControlAndTunnel() {
 }
 
 func (a *App) initManagedServices() error {
-	a.proxy = expose.NewManager(a.control, a.logger)
+	a.proxy = expose.NewManager(a.control, a.cfg.UpdownScript, a.logger)
 	a.supervisor.Add(a.proxy)
 
 	a.health = health.NewMonitor(a.control, a.cfg.EnforceHealthCert, a.logger)
