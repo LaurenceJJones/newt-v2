@@ -77,3 +77,14 @@ func TestParseFlagsOverridesEnvironmentValues(t *testing.T) {
 		t.Fatalf("unexpected port: %d", cfg.Port)
 	}
 }
+
+func TestLoadFromEnvLoadsTelemetryPprofFlag(t *testing.T) {
+	t.Setenv("NEWT_PPROF_ENABLED", "true")
+
+	cfg := DefaultConfig()
+	cfg.loadFromEnv()
+
+	if !cfg.PprofEnabled {
+		t.Fatal("expected pprof to be enabled from environment")
+	}
+}

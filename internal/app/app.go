@@ -293,6 +293,7 @@ func (a *App) initTelemetry() error {
 		ServiceVersion: version.Short(),
 		Region:         a.cfg.Region,
 		PrometheusAddr: a.cfg.AdminAddr,
+		PprofEnabled:   a.cfg.PprofEnabled,
 		OTLPEnabled:    a.cfg.OTLPEnabled,
 	}, a.logger)
 	if err != nil {

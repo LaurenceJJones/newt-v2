@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -27,6 +28,7 @@ type Config struct {
 	ServiceVersion string
 	Region         string
 	PrometheusAddr string // Address for Prometheus metrics endpoint
+	PprofEnabled   bool   // Enable pprof handlers on the admin server
 	OTLPEnabled    bool   // Enable OTLP export
 	OTLPEndpoint   string // OTLP collector endpoint
 }
@@ -146,6 +148,13 @@ func (p *Provider) Start(ctx context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	if p.cfg.PprofEnabled {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 
 	p.httpServer = &http.Server{
 		Addr:              p.cfg.PrometheusAddr,
