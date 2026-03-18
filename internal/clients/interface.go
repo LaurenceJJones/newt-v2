@@ -10,13 +10,14 @@ import (
 	"github.com/fosrl/newt/internal/wgtester"
 	pkglogger "github.com/fosrl/newt/pkg/logger"
 	wgDevice "golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 func (m *Manager) ensureInterface(ipAddress string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if ipAddress == m.clientIP && m.device != nil && m.clientNet != nil && m.clientTun != nil {
+	if ipAddress == m.clientIP && m.device != nil && m.clientTun != nil && (m.clientNet != nil || m.native) {
 		return nil
 	}
 
@@ -29,6 +30,10 @@ func (m *Manager) ensureInterface(ipAddress string) error {
 	dnsIP, err := netip.ParseAddr(m.dns)
 	if err != nil {
 		dnsIP = netip.MustParseAddr("9.9.9.9")
+	}
+
+	if m.native {
+		return m.ensureNativeInterfaceLocked(ipAddress)
 	}
 
 	tunDev, ns, err := netstack.CreateTUN([]netip.Addr{addr}, []netip.Addr{dnsIP}, m.mtu)
@@ -72,6 +77,68 @@ func (m *Manager) ensureInterface(ipAddress string) error {
 	m.clientIP = ipAddress
 	m.clientTun = tunDev
 	m.clientNet = ns
+	m.device = device
+	m.tester = tester
+	return nil
+}
+
+func (m *Manager) ensureNativeInterfaceLocked(ipAddress string) error {
+	if err := checkNativeInterfacePermissions(); err != nil {
+		return err
+	}
+
+	tunDev, err := tun.CreateTUN(m.iface, m.mtu)
+	if err != nil {
+		return fmt.Errorf("create native tun: %w", err)
+	}
+
+	logger := &wgDevice.Logger{
+		Verbosef: func(format string, args ...any) { pkglogger.Debugf(m.logger, format, args...) },
+		Errorf:   func(format string, args ...any) { pkglogger.Errorf(m.logger, format, args...) },
+	}
+
+	m.sharedBind.AddRef()
+	device, err := tunnel.NewDevice(tunDev, m.sharedBind, logger, m.privateKeyHex)
+	if err != nil {
+		_ = m.sharedBind.Release()
+		_ = tunDev.Close()
+		return fmt.Errorf("create native client wireguard device: %w", err)
+	}
+	if err := device.Up(); err != nil {
+		device.Close()
+		_ = tunDev.Close()
+		return fmt.Errorf("bring up native client wireguard device: %w", err)
+	}
+
+	ifaceName := m.iface
+	if name, err := tunDev.Name(); err == nil && name != "" {
+		ifaceName = name
+	}
+	if err := configureNativeInterface(ifaceName, ipAddress, m.mtu); err != nil {
+		device.Close()
+		_ = tunDev.Close()
+		return err
+	}
+
+	testerConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: int(m.port + 1)})
+	if err != nil {
+		device.Close()
+		_ = tunDev.Close()
+		return fmt.Errorf("start native wg tester listener: %w", err)
+	}
+	tester := wgtester.New(testerConn, m.port, m.logger)
+	if err := tester.Start(); err != nil {
+		_ = testerConn.Close()
+		device.Close()
+		_ = tunDev.Close()
+		return fmt.Errorf("start native wg tester: %w", err)
+	}
+
+	m.logger.Info("clients native wg interface started", "interface", ifaceName, "port", m.port, "client_ip", ipAddress)
+
+	m.clientIP = ipAddress
+	m.clientTun = tunDev
+	m.clientNet = nil
 	m.device = device
 	m.tester = tester
 	return nil

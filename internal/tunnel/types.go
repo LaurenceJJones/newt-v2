@@ -20,9 +20,6 @@ type Config struct {
 	// Local WireGuard port (0 = random)
 	LocalPort uint16
 
-	// Whether to use native WireGuard interface
-	NativeMode bool
-
 	// PingInterval controls how often tunnel health is checked.
 	PingInterval time.Duration
 

@@ -330,7 +330,6 @@ func (a *App) initControlAndTunnel(tlsConfig *tls.Config) error {
 		MTU:           a.cfg.MTU,
 		DNS:           a.cfg.DNS,
 		LocalPort:     a.cfg.Port,
-		NativeMode:    a.cfg.NativeMode,
 		PingInterval:  time.Duration(a.cfg.PingInterval) * time.Second,
 		PingTimeout:   time.Duration(a.cfg.PingTimeout) * time.Second,
 		NoCloud:       a.cfg.NoCloud,
@@ -341,7 +340,7 @@ func (a *App) initControlAndTunnel(tlsConfig *tls.Config) error {
 		return nil
 	}
 
-	clientsManager, err := clients.NewManager(a.cfg.Port, a.cfg.MTU, a.cfg.DNS, a.control, a.logger)
+	clientsManager, err := clients.NewManager(a.cfg.Port, a.cfg.MTU, a.cfg.DNS, a.cfg.InterfaceName, a.cfg.NativeMode, a.control, a.logger)
 	if err != nil {
 		return fmt.Errorf("create clients manager: %w", err)
 	}

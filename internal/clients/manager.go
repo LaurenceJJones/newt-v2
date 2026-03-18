@@ -27,6 +27,8 @@ type Manager struct {
 	port   uint16
 	mtu    int
 	dns    string
+	iface  string
+	native bool
 
 	control *control.Client
 
@@ -70,7 +72,7 @@ type peerReading struct {
 }
 
 // NewManager creates a new client relay manager and its shared UDP socket.
-func NewManager(port uint16, mtu int, dns string, controlClient *control.Client, logger *slog.Logger) (*Manager, error) {
+func NewManager(port uint16, mtu int, dns, iface string, native bool, controlClient *control.Client, logger *slog.Logger) (*Manager, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -112,6 +114,8 @@ func NewManager(port uint16, mtu int, dns string, controlClient *control.Client,
 		port:               actualPort,
 		mtu:                mtu,
 		dns:                dns,
+		iface:              iface,
+		native:             native,
 		control:            controlClient,
 		sharedBind:         sharedBind,
 		holePunch:          holePunch,

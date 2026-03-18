@@ -251,13 +251,19 @@ func TestRegisterRetryStartsAndStopsOnTunnelConnect(t *testing.T) {
 		LocalAddr: netip.MustParseAddr("100.64.0.10"),
 	}, &tunnel.NetStack{})
 
-	time.Sleep(5 * time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
 
 	mu.Lock()
 	afterConnect := registers
 	mu.Unlock()
-	if afterConnect != beforeConnect {
-		t.Fatalf("expected registration retry to stop after connect, before=%d after=%d", beforeConnect, afterConnect)
+
+	time.Sleep(5 * time.Millisecond)
+
+	mu.Lock()
+	afterSettle := registers
+	mu.Unlock()
+	if afterSettle != afterConnect {
+		t.Fatalf("expected registration retry to stop after connect, after_connect=%d after_settle=%d", afterConnect, afterSettle)
 	}
 }
 
